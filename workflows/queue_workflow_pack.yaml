@@ -1,0 +1,791 @@
+version: "1.0.0"
+name: "revenue-edge-agent-queue-workflow-pack"
+description: "Machine-readable queues, events, workflows, workers, SLAs, and retry rules for the Revenue Edge Agent."
+
+principles:
+  - "Every inbound interaction must produce a persisted event."
+  - "Every customer-facing response must be grounded in approved business knowledge, approved templates, or real integration data."
+  - "Every conversation should end with a state change, task, booking attempt, quote draft, follow-up schedule, or explicit resolution."
+  - "Autopilot handles low-risk, rules-based steps. Humans review pricing, exceptions, complaints, sensitive issues, and low-confidence decisions."
+
+queue_table: "public.queue_jobs"
+event_table: "public.events"
+
+job_contract:
+  required_columns:
+    - "id"
+    - "business_id"
+    - "queue_name"
+    - "status"
+    - "priority"
+    - "payload"
+    - "idempotency_key"
+    - "available_at"
+    - "attempts"
+    - "max_attempts"
+  payload_schema:
+    type: "object"
+    required:
+      - "event_type"
+      - "event_id"
+      - "business_id"
+      - "trace_id"
+    properties:
+      event_type: "string"
+      event_id: "uuid"
+      business_id: "uuid"
+      trace_id: "string"
+      conversation_id: "uuid|null"
+      contact_id: "uuid|null"
+      lead_id: "uuid|null"
+      source: "string"
+      payload: "object"
+  idempotency_key_patterns:
+    inbound_event: "inbound:{provider}:{external_event_id}"
+    missed_call_textback: "textback:{business_id}:{provider_call_id}"
+    outbound_message: "outbound:{business_id}:{conversation_id}:{message_hash}"
+    followup: "followup:{business_id}:{lead_id}:{followup_type}:{scheduled_date}"
+    quote_recovery: "quote-recovery:{business_id}:{quote_id}:{attempt_number}"
+    booking_request: "booking:{business_id}:{lead_id}:{requested_slot_hash}"
+    metric_rollup: "metrics:{business_id}:{metric_date}"
+
+retry_defaults:
+  max_attempts: 5
+  backoff:
+    strategy: "exponential_with_jitter"
+    first_delay_seconds: 60
+    max_delay_seconds: 3600
+  dead_letter_queue: "dead-letter"
+  retryable_errors:
+    - "rate_limit"
+    - "temporary_provider_error"
+    - "network_timeout"
+    - "lock_timeout"
+    - "calendar_temporarily_unavailable"
+  non_retryable_errors:
+    - "invalid_phone"
+    - "permission_denied"
+    - "missing_business_config"
+    - "policy_blocked"
+    - "malformed_payload"
+
+queues:
+  inbound-events:
+    purpose: "Normalize raw provider events into contacts, conversations, messages, and immutable events."
+    priority: 10
+    consumers:
+      - "inbound_normalizer"
+    produces:
+      - "conversation-intelligence"
+    sla_seconds: 15
+
+  conversation-intelligence:
+    purpose: "Classify intent, extract fields, retrieve knowledge, choose next action, and create a decision object."
+    priority: 20
+    consumers:
+      - "conversation_intelligence_worker"
+    produces:
+      - "outbound-actions"
+      - "human-handoff"
+      - "quote-drafting"
+      - "booking-sync"
+      - "follow-up-scheduler"
+    sla_seconds: 30
+
+  outbound-actions:
+    purpose: "Send SMS, email, chat, or internal notifications after policy checks and idempotency checks."
+    priority: 30
+    consumers:
+      - "outbound_action_worker"
+    produces:
+      - "conversation-intelligence"
+      - "metrics-rollup"
+    sla_seconds: 20
+
+  human-handoff:
+    purpose: "Create operator tasks with summaries for low-confidence, sensitive, urgent, or high-value cases."
+    priority: 15
+    consumers:
+      - "handoff_worker"
+    produces:
+      - "outbound-actions"
+      - "metrics-rollup"
+    sla_seconds: 30
+
+  quote-drafting:
+    purpose: "Turn qualified quote requests into structured quote drafts or quote-review tasks."
+    priority: 40
+    consumers:
+      - "quote_drafting_worker"
+    produces:
+      - "human-handoff"
+      - "outbound-actions"
+      - "follow-up-scheduler"
+      - "metrics-rollup"
+    sla_seconds: 90
+
+  booking-sync:
+    purpose: "Check availability, create tentative or confirmed bookings, and sync calendar/CRM/job-system state."
+    priority: 35
+    consumers:
+      - "booking_worker"
+    produces:
+      - "outbound-actions"
+      - "human-handoff"
+      - "metrics-rollup"
+    sla_seconds: 60
+
+  follow-up-scheduler:
+    purpose: "Schedule future follow-ups for quotes, stale leads, callbacks, and awaiting-customer states."
+    priority: 60
+    consumers:
+      - "followup_scheduler_worker"
+    produces:
+      - "outbound-actions"
+      - "conversation-intelligence"
+    sla_seconds: 120
+
+  knowledge-ingestion:
+    purpose: "Chunk, classify, embed, and mark business knowledge for review/approval."
+    priority: 80
+    consumers:
+      - "knowledge_ingestion_worker"
+    produces:
+      - "human-handoff"
+    sla_seconds: 300
+
+  metrics-rollup:
+    purpose: "Aggregate operational and revenue-edge metrics into daily metric snapshots."
+    priority: 90
+    consumers:
+      - "metrics_rollup_worker"
+    produces: []
+    sla_seconds: 300
+
+  dead-letter:
+    purpose: "Hold failed jobs for operator or developer review."
+    priority: 100
+    consumers:
+      - "dead_letter_review_worker"
+    produces:
+      - "human-handoff"
+    sla_seconds: 86400
+
+events:
+  call.missed:
+    producer: "phone_adapter"
+    description: "A customer called and was not answered."
+    payload_required:
+      - "provider"
+      - "provider_call_id"
+      - "from_phone_e164"
+      - "to_phone_e164"
+      - "occurred_at"
+    first_queue: "inbound-events"
+
+  message.received:
+    producer: "sms_adapter|email_adapter|web_chat_adapter|web_form_adapter|social_adapter"
+    description: "An inbound customer message arrived."
+    payload_required:
+      - "provider"
+      - "external_message_id"
+      - "channel_type"
+      - "body"
+      - "occurred_at"
+    first_queue: "inbound-events"
+
+  message.sent:
+    producer: "outbound_action_worker"
+    description: "A customer-facing outbound message was sent."
+    payload_required:
+      - "message_id"
+      - "conversation_id"
+      - "channel_type"
+      - "provider"
+
+  conversation.classified:
+    producer: "conversation_intelligence_worker"
+    description: "Conversation received intent, urgency, confidence, and next-action recommendation."
+    payload_required:
+      - "conversation_id"
+      - "decision"
+
+  lead.created:
+    producer: "conversation_intelligence_worker"
+    description: "A new opportunity was created from an interaction."
+    payload_required:
+      - "lead_id"
+      - "contact_id"
+      - "source"
+
+  lead.qualified:
+    producer: "conversation_intelligence_worker"
+    description: "Required fields were collected for a booking, quote, or callback."
+    payload_required:
+      - "lead_id"
+      - "required_fields"
+      - "collected_fields"
+
+  quote.requested:
+    producer: "conversation_intelligence_worker"
+    description: "A qualified quote request is ready for drafting or review."
+    payload_required:
+      - "lead_id"
+      - "conversation_id"
+
+  quote.drafted:
+    producer: "quote_drafting_worker"
+    description: "A quote draft was created for review or sending."
+    payload_required:
+      - "quote_id"
+      - "lead_id"
+      - "review_required"
+
+  quote.sent:
+    producer: "outbound_action_worker|operator"
+    description: "A quote was sent to a customer."
+    payload_required:
+      - "quote_id"
+      - "lead_id"
+      - "sent_at"
+
+  booking.requested:
+    producer: "conversation_intelligence_worker"
+    description: "A qualified booking or callback request is ready for availability handling."
+    payload_required:
+      - "lead_id"
+      - "preferred_time"
+
+  booking.created:
+    producer: "booking_worker|operator"
+    description: "A booking was created in the local system and optionally synced externally."
+    payload_required:
+      - "booking_id"
+      - "lead_id"
+
+  handoff.created:
+    producer: "conversation_intelligence_worker|handoff_worker"
+    description: "Human review task was created."
+    payload_required:
+      - "task_id"
+      - "reason"
+      - "conversation_id"
+
+  followup.due:
+    producer: "followup_scheduler_worker"
+    description: "A scheduled follow-up is due now."
+    payload_required:
+      - "lead_id"
+      - "followup_type"
+      - "attempt_number"
+
+  metric.rollup.requested:
+    producer: "any_worker|cron"
+    description: "Metrics should be aggregated for one business/date."
+    payload_required:
+      - "business_id"
+      - "metric_date"
+
+decision_object_schema:
+  required:
+    - "business_id"
+    - "conversation_id"
+    - "contact_id"
+    - "intent"
+    - "urgency"
+    - "confidence"
+    - "service_fit"
+    - "missing_fields"
+    - "extracted_fields"
+    - "recommended_next_action"
+    - "handoff_needed"
+    - "customer_response"
+    - "internal_summary"
+  intents:
+    - "quote_request"
+    - "booking_request"
+    - "urgent_service"
+    - "faq"
+    - "support"
+    - "reschedule"
+    - "complaint"
+    - "vendor"
+    - "spam"
+    - "unknown"
+  next_actions:
+    - "answer"
+    - "ask_question"
+    - "create_lead"
+    - "book"
+    - "draft_quote"
+    - "schedule_callback"
+    - "send_followup"
+    - "handoff"
+    - "reject"
+    - "no_action"
+  confidence_thresholds:
+    autopilot_minimum: 0.82
+    ask_followup_minimum: 0.72
+    handoff_below: 0.72
+
+workflow_defaults:
+  quiet_hours:
+    respect_business_timezone: true
+    sms_min_hour_local: 8
+    sms_max_hour_local: 20
+    emergency_override_allowed: true
+  followup_limits:
+    max_customer_followups_per_lead: 4
+    stop_on_customer_reply: true
+    stop_on_human_override: true
+  handoff_sla:
+    emergency_minutes: 5
+    same_day_minutes: 30
+    routine_business_hours: 4
+
+workflows:
+  missed_call_recovery:
+    description: "Immediately text a missed caller, capture need, and move into qualification or handoff."
+    trigger_events:
+      - "call.missed"
+    entry_queue: "inbound-events"
+    idempotency_key: "textback:{business_id}:{provider_call_id}"
+    steps:
+      - name: "normalize_call"
+        worker: "inbound_normalizer"
+        writes:
+          - "contacts"
+          - "conversations"
+          - "events"
+      - name: "send_textback"
+        worker: "outbound_action_worker"
+        condition: "business.channels.sms.active == true"
+        template: "missed_call_recovery"
+        customer_message: "Thanks for calling {{business.name}} — sorry we missed you. What can we help with today?"
+        writes:
+          - "messages"
+          - "events"
+      - name: "schedule_no_reply_followup"
+        worker: "followup_scheduler_worker"
+        delay_minutes: 60
+        condition: "no_customer_reply"
+      - name: "classify_reply"
+        worker: "conversation_intelligence_worker"
+        trigger_events:
+          - "message.received"
+      - name: "next_action"
+        branching:
+          quote_request: "quote_intake_and_draft"
+          booking_request: "booking_or_callback"
+          urgent_service: "emergency_triage"
+          faq: "faq_to_conversion"
+          complaint: "complaint_or_sensitive_handoff"
+          unknown: "ask_one_clarifying_question_or_handoff"
+    success_metrics:
+      - "missed_calls"
+      - "recovered_leads"
+      - "avg_first_response_seconds"
+
+  after_hours_intake:
+    description: "Respond after hours, collect useful details, and queue the right next step."
+    trigger_events:
+      - "message.received"
+      - "web_form.submitted"
+    condition: "outside_business_hours == true"
+    steps:
+      - name: "classify_and_retrieve"
+        worker: "conversation_intelligence_worker"
+      - name: "respond_with_intake"
+        worker: "outbound_action_worker"
+        template: "after_hours_intake"
+        condition: "decision.handoff_needed == false"
+      - name: "create_handoff_if_needed"
+        worker: "handoff_worker"
+        condition: "decision.handoff_needed == true"
+      - name: "schedule_opening_hours_review"
+        worker: "followup_scheduler_worker"
+        delay_until: "next_business_open"
+    success_metrics:
+      - "after_hours_leads"
+      - "qualified_after_hours_leads"
+
+  faq_to_conversion:
+    description: "Answer a grounded question and convert buying intent into intake."
+    trigger_events:
+      - "message.received"
+    steps:
+      - name: "retrieve_approved_knowledge"
+        worker: "conversation_intelligence_worker"
+        retrieval_filter: "knowledge_items.active = true and knowledge_items.approved = true"
+      - name: "compose_answer"
+        worker: "conversation_intelligence_worker"
+        rule: "answer only from retrieved knowledge or templates"
+      - name: "append_conversion_question"
+        worker: "conversation_intelligence_worker"
+        condition: "buying_intent_detected == true"
+        examples:
+          - "Would you like help scheduling that?"
+          - "Would you like us to put together a quote?"
+      - name: "send_answer"
+        worker: "outbound_action_worker"
+      - name: "create_knowledge_review_task"
+        worker: "handoff_worker"
+        condition: "knowledge_missing == true"
+        task_type: "knowledge_review"
+    success_metrics:
+      - "faq_answers_sent"
+      - "faq_to_lead_conversions"
+      - "knowledge_gaps"
+
+  quote_intake_and_draft:
+    description: "Collect scope, service area, and requirements before drafting a quote or quote-review task."
+    trigger_events:
+      - "quote.requested"
+      - "message.received"
+    steps:
+      - name: "match_service"
+        worker: "conversation_intelligence_worker"
+      - name: "collect_required_fields"
+        worker: "conversation_intelligence_worker"
+        required_default_fields:
+          - "name"
+          - "phone_or_email"
+          - "service_requested"
+          - "property_address_or_location"
+          - "scope_or_issue"
+          - "urgency"
+      - name: "request_photos_if_relevant"
+        worker: "outbound_action_worker"
+        condition: "service.photo_helpful == true and photos_missing == true"
+      - name: "create_or_update_lead"
+        worker: "conversation_intelligence_worker"
+        writes:
+          - "leads"
+          - "intake_fields"
+      - name: "draft_quote"
+        worker: "quote_drafting_worker"
+        condition: "required_fields_complete == true"
+        writes:
+          - "quotes"
+      - name: "review_or_send"
+        branching:
+          approved_pricing_rule_found: "outbound-actions"
+          price_or_scope_uncertain: "human-handoff"
+          confidence_low: "human-handoff"
+      - name: "schedule_quote_recovery"
+        worker: "followup_scheduler_worker"
+        condition: "quote.status == sent"
+        delays_days:
+          - 1
+          - 3
+          - 7
+    success_metrics:
+      - "quote_requests"
+      - "quotes_drafted"
+      - "quotes_sent"
+      - "estimate_turnaround_seconds"
+
+  booking_or_callback:
+    description: "Book a qualified appointment or create a callback task."
+    trigger_events:
+      - "booking.requested"
+      - "message.received"
+    steps:
+      - name: "verify_booking_allowed"
+        worker: "booking_worker"
+        checks:
+          - "booking_automation_enabled"
+          - "service_in_scope"
+          - "required_fields_complete"
+          - "real_availability_available"
+      - name: "offer_slots"
+        worker: "outbound_action_worker"
+        condition: "customer_has_not_selected_slot"
+      - name: "create_booking"
+        worker: "booking_worker"
+        condition: "customer_selected_valid_slot"
+        writes:
+          - "bookings"
+          - "events"
+      - name: "send_confirmation"
+        worker: "outbound_action_worker"
+        condition: "booking.status in ['tentative', 'confirmed']"
+      - name: "callback_fallback"
+        worker: "handoff_worker"
+        condition: "booking_not_allowed_or_availability_error"
+        task_type: "callback"
+    success_metrics:
+      - "booking_requests"
+      - "bookings_created"
+      - "callbacks_created"
+
+  emergency_triage:
+    description: "Collect only essential fields and alert a human fast."
+    trigger_events:
+      - "message.received"
+      - "call.missed"
+    condition: "urgency == emergency or business_rule.emergency == true"
+    steps:
+      - name: "collect_critical_details"
+        worker: "conversation_intelligence_worker"
+        fields:
+          - "name"
+          - "phone"
+          - "location"
+          - "issue"
+          - "immediate_safety_or_access_constraints"
+      - name: "send_acknowledgement"
+        worker: "outbound_action_worker"
+        template: "emergency_acknowledgement"
+        rule: "do not promise arrival time unless approved by business rule"
+      - name: "create_urgent_handoff"
+        worker: "handoff_worker"
+        priority: 1
+        due_minutes: 5
+      - name: "notify_on_call"
+        worker: "outbound_action_worker"
+        channel: "internal_sms_or_email"
+    success_metrics:
+      - "emergency_handoffs"
+      - "emergency_response_seconds"
+
+  complaint_or_sensitive_handoff:
+    description: "Stop autopilot and route the conversation to a human with context."
+    trigger_events:
+      - "message.received"
+    condition: "intent == complaint or sensitive_topic_detected == true"
+    steps:
+      - name: "summarize_issue"
+        worker: "conversation_intelligence_worker"
+      - name: "send_neutral_ack"
+        worker: "outbound_action_worker"
+        customer_message: "Thanks for letting us know. I’m going to have the team review this so we can respond properly."
+      - name: "create_handoff_task"
+        worker: "handoff_worker"
+        priority: 1
+        task_type: "human_handoff"
+      - name: "pause_autopilot"
+        worker: "handoff_worker"
+        updates:
+          conversations.status: "awaiting_human"
+    success_metrics:
+      - "sensitive_handoffs"
+      - "complaint_response_seconds"
+
+  quote_recovery_followup:
+    description: "Follow up after a quote is sent and stop on reply, conversion, or human override."
+    trigger_events:
+      - "quote.sent"
+      - "followup.due"
+    steps:
+      - name: "check_stop_conditions"
+        worker: "followup_scheduler_worker"
+        stop_if:
+          - "customer_replied"
+          - "lead.stage in ['booked', 'won', 'lost']"
+          - "human_override == true"
+          - "max_attempts_reached"
+      - name: "send_followup"
+        worker: "outbound_action_worker"
+        templates_by_attempt:
+          1: "quote_followup_1"
+          2: "quote_followup_2"
+          3: "quote_followup_final"
+      - name: "schedule_next_attempt"
+        worker: "followup_scheduler_worker"
+        delays_days_by_attempt:
+          1: 2
+          2: 4
+          3: null
+    success_metrics:
+      - "quote_followups_sent"
+      - "quote_replies_recovered"
+      - "quote_recovery_wins"
+
+  stale_lead_reactivation:
+    description: "Reactivate dormant leads or customers using approved templates and segmentation."
+    trigger_events:
+      - "reactivation.batch_requested"
+    steps:
+      - name: "select_segment"
+        worker: "followup_scheduler_worker"
+        default_filters:
+          - "lead.stage in ['no_response', 'nurture']"
+          - "last_activity_at older than configured threshold"
+      - name: "create_followup_jobs"
+        worker: "followup_scheduler_worker"
+      - name: "send_reactivation_message"
+        worker: "outbound_action_worker"
+        condition: "contact_opt_out != true"
+      - name: "route_replies_to_intelligence"
+        worker: "conversation_intelligence_worker"
+    success_metrics:
+      - "reactivation_messages_sent"
+      - "reactivation_replies"
+      - "reactivation_bookings"
+
+  daily_roi_rollup:
+    description: "Aggregate daily operational and revenue metrics."
+    trigger_events:
+      - "metric.rollup.requested"
+    schedule: "hourly plus end-of-day"
+    steps:
+      - name: "aggregate_events"
+        worker: "metrics_rollup_worker"
+      - name: "upsert_metric_snapshot"
+        worker: "metrics_rollup_worker"
+        writes:
+          - "metric_snapshots"
+      - name: "operator_summary"
+        worker: "outbound_action_worker"
+        condition: "business.settings.daily_summary_enabled == true"
+    success_metrics:
+      - "metric_snapshots_created"
+
+workers:
+  inbound_normalizer:
+    responsibilities:
+      - "Deduplicate provider events."
+      - "Upsert contact by phone/email within business."
+      - "Create or reopen conversation."
+      - "Persist inbound message or missed-call event."
+      - "Enqueue conversation-intelligence when customer text exists."
+    inputs:
+      - "call.missed"
+      - "message.received"
+    outputs:
+      - "events"
+      - "contacts"
+      - "conversations"
+      - "messages"
+      - "queue_jobs:conversation-intelligence"
+    failure_policy:
+      missing_business: "dead_letter"
+      invalid_contact: "human_handoff_or_dead_letter"
+      duplicate_event: "complete_successfully"
+
+  conversation_intelligence_worker:
+    responsibilities:
+      - "Load business profile, active services, active rules, templates, approved knowledge, contact, conversation, and recent messages."
+      - "Classify intent and urgency."
+      - "Extract structured intake fields."
+      - "Update lead and intake field records."
+      - "Generate decision object."
+      - "Choose next queue."
+    outputs:
+      - "conversation.classified"
+      - "lead.created"
+      - "lead.qualified"
+      - "quote.requested"
+      - "booking.requested"
+      - "handoff.created"
+    policy_checks:
+      - "No invented pricing."
+      - "No unsupported availability."
+      - "No unsupported service area."
+      - "Handoff if confidence below configured threshold."
+
+  outbound_action_worker:
+    responsibilities:
+      - "Render approved templates or approved decision.customer_response."
+      - "Respect quiet hours and opt-outs."
+      - "Send through the correct provider."
+      - "Persist outbound message."
+      - "Emit message.sent."
+    policy_checks:
+      - "Must have idempotency key."
+      - "Must pass customer-facing response quality checks."
+      - "Must not send if conversation paused for human handoff."
+
+  handoff_worker:
+    responsibilities:
+      - "Create operator task."
+      - "Attach summary, customer details, urgency, missing fields, and recommended next step."
+      - "Update conversation status to awaiting_human or escalated."
+      - "Notify assigned human or escalation contact."
+    task_defaults:
+      emergency:
+        priority: 1
+        due_minutes: 5
+      same_day:
+        priority: 2
+        due_minutes: 30
+      routine:
+        priority: 3
+        due_business_hours: 4
+
+  quote_drafting_worker:
+    responsibilities:
+      - "Load service, intake fields, pricing policy, and quote templates."
+      - "Create a structured quote draft."
+      - "Set quote to awaiting_review unless an approved auto-send rule applies."
+      - "Create quote_review task when human review is needed."
+    hard_blocks:
+      - "No approved service match."
+      - "No approved pricing rule."
+      - "Missing required fields."
+      - "High-value or unusual scope."
+
+  booking_worker:
+    responsibilities:
+      - "Verify service and required fields."
+      - "Check real availability."
+      - "Create tentative or confirmed booking."
+      - "Sync to calendar/CRM/job system."
+      - "Create callback task on failure or policy block."
+    hard_blocks:
+      - "No booking integration."
+      - "No valid slot."
+      - "Customer has not accepted slot."
+      - "Service outside area."
+
+  followup_scheduler_worker:
+    responsibilities:
+      - "Create delayed queue jobs."
+      - "Check stop conditions before every follow-up."
+      - "Enforce follow-up limits."
+      - "Route replies back to intelligence."
+
+  knowledge_ingestion_worker:
+    responsibilities:
+      - "Chunk source documents."
+      - "Classify item type."
+      - "Generate embeddings."
+      - "Mark knowledge as review_required until approved."
+      - "Create knowledge_review tasks."
+
+  metrics_rollup_worker:
+    responsibilities:
+      - "Aggregate events, leads, quotes, bookings, tasks, and messages by business/date."
+      - "Upsert metric_snapshots."
+      - "Compute before/after lift where baseline exists."
+
+operator_inbox_views:
+  urgent_handoffs:
+    filter: "tasks.status in ['open','in_progress'] and tasks.priority <= 2"
+    sort: "priority asc, due_at asc nulls last, created_at asc"
+  quote_review:
+    filter: "tasks.type = 'quote_review' and tasks.status = 'open'"
+    sort: "created_at asc"
+  knowledge_review:
+    filter: "tasks.type = 'knowledge_review' and tasks.status = 'open'"
+    sort: "created_at asc"
+  awaiting_customer:
+    filter: "conversations.status = 'awaiting_customer'"
+    sort: "last_message_at desc"
+  stale_leads:
+    filter: "leads.stage in ['no_response','nurture']"
+    sort: "last_activity_at asc nulls first"
+
+minimum_dashboard_metrics:
+  - "missed_calls"
+  - "missed_calls_recovered"
+  - "avg_first_response_seconds"
+  - "inbound_leads"
+  - "qualified_leads"
+  - "quotes_sent"
+  - "bookings_created"
+  - "wins"
+  - "attributed_revenue"
+  - "human_handoffs"
+  - "knowledge_gaps"
