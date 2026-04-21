@@ -1,0 +1,59 @@
+services:
+  re-api:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    image: revenueedge/re-api:local
+    container_name: re-api
+    env_file:
+      - .env
+    environment:
+      - SERVICE_NAME=re-api
+      - PORT=8080
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  re-webhooks:
+    build:
+      context: ./apps/webhooks
+      dockerfile: Dockerfile
+    image: revenueedge/re-webhooks:local
+    container_name: re-webhooks
+    env_file:
+      - .env
+    environment:
+      - SERVICE_NAME=re-webhooks
+      - PORT=8081
+    ports:
+      - "8081:8081"
+    depends_on:
+      - re-api
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8081/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  re-workers:
+    build:
+      context: ./apps/workers
+      dockerfile: Dockerfile
+    image: revenueedge/re-workers:local
+    container_name: re-workers
+    env_file:
+      - .env
+    environment:
+      - SERVICE_NAME=re-workers
+      # Comma-separated list of worker names to run in this container.
+      # Leave unset to run all MVP workers.
+      - WORKERS=inbound_normalizer,conversation_intelligence,outbound_action,handoff,followup_scheduler
+    depends_on:
+      - re-api
+    restart: unless-stopped
