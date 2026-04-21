@@ -434,3 +434,73 @@ See [`PHASE_1_CHECKLIST.md`](./PHASE_1_CHECKLIST.md). Concretely:
 5. Add the first real CRUD endpoints under `apps/api/app/routes/`: `/v1/businesses`, `/v1/channels`, `/v1/conversations`, `/v1/tasks`.
 
 The scaffolding is deliberately thin. Nothing ported from SMB-MetaPattern has been left as a hidden dependency; anything not yet needed is either skipped or called out in [`REUSE_MAP.md`](./REUSE_MAP.md).
+
+---
+
+## 10. Phase 1 — executed (backend slice)
+
+Phase 1 backend pipeline landed end-to-end on disk. `PHASE_1_CHECKLIST.md`
+tracks per-item status; the summary:
+
+**New shared worker library** — `apps/workers/src/lib/`
+- `phone.py` — permissive-in / E.164-out normalization matching the
+  `contacts.phone_e164` regex constraint.
+- `channels.py` — DID → channel/business resolution (with a
+  `channel_type_hint` tie-breaker when voice + SMS share the same DID).
+- `contacts.py` — lookup-then-insert upsert against the unique partial
+  indexes on `contacts(business_id, phone_e164|email)`.
+- `conversations.py` — open-conversation reuse policy (single open thread
+  per `business_id, contact_id, channel_type`), message insert, context
+  loader for the intelligence worker, patch-merged conversation updates.
+- `templates.py` — Liquid-ish template loader + renderer (supports the
+  seeded `{{contact.first_name | default: "there"}}` subset).
+- `hours.py` — business-hours check (weekly JSON schedule, holiday list,
+  per-business tz). Not yet enforced but plumbed through the context.
+- `llm.py` — OpenAI chat completions in JSON mode with a deterministic
+  heuristic fallback when `OPENAI_API_KEY` is empty, so the smoke test
+  works without external spend.
+
+**Workers** — `apps/workers/src/workers/`
+- `inbound_normalizer.py` — resolves business, upserts contact, opens
+  conversation, persists messages, fans out to outbound + intelligence,
+  writes audit events.
+- `conversation_intelligence.py` — calls the LLM, applies a 0.72
+  confidence floor for autopilot, routes to outbound / handoff, persists
+  the decision onto the conversation.
+- `outbound_action.py` — template or body-literal SMS sends via Retell
+  (Twilio fallback), opt-out aware, writes outbound messages + events.
+- `handoff.py` — creates `tasks`, flips conversation to
+  `awaiting_human`, optional operator email via SendGrid.
+- `followup_scheduler.py` remains a stub until Phase 4.
+
+**API additions** — `apps/api/app/routes/`
+- `businesses.py` (`GET /v1/businesses`, `GET /v1/businesses/:id`).
+- `conversations.py` (`GET /v1/conversations`, `GET /v1/conversations/:id`).
+- `tasks.py` (`GET /v1/tasks`, `PATCH /v1/tasks/:id`).
+- `metrics.py` (`GET /v1/metrics`, `POST /v1/metrics/rollup`).
+
+**Scheduler + metrics** — `apps/api/app/services/`
+- `metrics_rollup.py` aggregates events/leads/quotes/bookings/messages
+  into `metric_snapshots` (upserted on `(business_id, metric_date)`).
+- `scheduler.py` — in-process asyncio loop; wired into `main.py` via
+  `startup`/`shutdown` handlers.
+
+**Smoke tooling**
+- `scripts/seed_business.py` — idempotent business + phone/SMS channel
+  seed, invokes `seed_revenue_edge_mvp_defaults`.
+- `scripts/smoke_phase1.sh` — drives the full missed-call happy path
+  against a running stack and asserts downstream events/messages/tasks.
+
+**Deferred from Phase 1** (documented on the checklist, moved to Phase 2):
+- Next.js dashboard UI (inbox + settings) — backend APIs are ready; UI
+  ships once the live Supabase project is provisioned.
+- Per-contact/per-business SMS rate limit (STOP handling is already
+  honored via `contacts.metadata.sms_opt_out`).
+- Quiet-hours enforcement in `outbound_action` (helper exists).
+- STOP/START/HELP handling at the inbound SMS layer — Retell handles
+  compliance for DIDs it provisions; we revisit if/when we route direct
+  Twilio.
+- Explicit `leads` lifecycle writes from the worker chain — today the
+  `conversations` row + events carry intent/urgency/confidence, which is
+  enough for the MVP dashboard. Lead CRUD arrives alongside the quote
+  intake flow in Phase 2.
