@@ -1,0 +1,19 @@
+[project]
+name = "re-webhooks"
+version = "0.1.0"
+description = "Revenue Edge webhook ingest service (Retell voice + SMS)"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115.0",
+  "uvicorn[standard]>=0.30.0",
+  "pydantic>=2.8.0",
+  "pydantic-settings>=2.5.0",
+  "httpx>=0.27.0",
+  "supabase>=2.8.0",
+  "retell-sdk>=4.0.0",
+  "sentry-sdk[fastapi]>=2.14.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
