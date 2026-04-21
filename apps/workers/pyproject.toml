@@ -10,6 +10,7 @@ dependencies = [
   "pydantic-settings>=2.5.0",
   "sentry-sdk>=2.14.0",
   "tenacity>=9.0.0",
+  "twilio>=9.2.0",
 ]
 
 [tool.ruff]
