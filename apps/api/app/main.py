@@ -1,8 +1,14 @@
 """Revenue Edge API Gateway — FastAPI entrypoint.
 
-Phase 0 scope: health/ready probes, internal queue enqueue, CORS, trace-ID,
-structured logging, Sentry. Phase 1+ will add auth-protected CRUD for
-businesses, channels, conversations, leads, tasks, and knowledge.
+Scope:
+  - Health / ready probes.
+  - Internal queue enqueue (webhook → worker handshake).
+  - CRUD for businesses, conversations, tasks (JWT-protected; header
+    fallback gated on `X-Internal-Key`).
+  - Metric snapshots + rollup trigger.
+  - In-process scheduler that runs `run_daily_rollup` on an interval.
+
+Observability: trace-ID middleware, structured JSON logging, Sentry.
 """
 
 from __future__ import annotations
@@ -17,8 +23,15 @@ from .config import get_settings, validate_startup_settings
 from .errors import AppError
 from .logging_config import setup_logging
 from .monitoring import capture_exception, init_sentry
-from .routes import health as health_routes
-from .routes import queue as queue_routes
+from .routes import (
+    businesses as businesses_routes,
+    conversations as conversations_routes,
+    health as health_routes,
+    metrics as metrics_routes,
+    queue as queue_routes,
+    tasks as tasks_routes,
+)
+from .services.scheduler import start_scheduler, stop_scheduler
 from .trace import TraceMiddleware, current_trace_id
 
 setup_logging()
@@ -53,6 +66,20 @@ app.add_middleware(
 
 app.include_router(health_routes.router)
 app.include_router(queue_routes.router)
+app.include_router(businesses_routes.router)
+app.include_router(conversations_routes.router)
+app.include_router(tasks_routes.router)
+app.include_router(metrics_routes.router)
+
+
+@app.on_event("startup")
+async def _on_startup() -> None:
+    start_scheduler()
+
+
+@app.on_event("shutdown")
+async def _on_shutdown() -> None:
+    await stop_scheduler()
 
 
 @app.exception_handler(AppError)
