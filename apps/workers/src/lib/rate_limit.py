@@ -36,20 +36,27 @@ async def check_sms_rate_limit(
     cooldown = cooldown_seconds or DEFAULT_COOLDOWN_SECONDS
     client = get_client()
     since = (datetime.now(timezone.utc) - timedelta(seconds=cooldown)).isoformat()
-    res = await async_execute(
+    q = (
         client.table("events")
-        .select("occurred_at")
+        .select("occurred_at, payload")
         .eq("business_id", business_id)
         .eq("event_type", "outbound.sms.sent")
         .gte("occurred_at", since)
         .order("occurred_at", desc=True)
         .limit(50)
     )
+    res = await async_execute(q)
     rows = getattr(res, "data", None) or []
     for row in rows:
-        payload = row if isinstance(row, dict) else {}
-        if payload.get("occurred_at"):
-            return max(0.0, cooldown - (datetime.now(timezone.utc) - _parse_ts(payload["occurred_at"])).total_seconds())
+        if not isinstance(row, dict):
+            continue
+        row_payload = row.get("payload") or {}
+        if isinstance(row_payload, str):
+            continue
+        if row_payload.get("contact_id") != contact_id:
+            continue
+        if row.get("occurred_at"):
+            return max(0.0, cooldown - (datetime.now(timezone.utc) - _parse_ts(row["occurred_at"])).total_seconds())
     return 0.0
 
 

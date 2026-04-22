@@ -201,12 +201,15 @@ class BaseWorker:
         retry_in_seconds: float = 60.0,
         force_dead: bool = False,
     ) -> None:
-        if force_dead:
-            retry_in_seconds = 0.0
         interval_str = f"{int(max(0, retry_in_seconds))} seconds"
         await rpc(
             "fail_queue_job",
-            {"p_job_id": job.id, "p_error": error[:1000], "p_retry_after": interval_str},
+            {
+                "p_job_id": job.id,
+                "p_error": error[:1000],
+                "p_retry_after": interval_str,
+                "p_force_dead": force_dead,
+            },
         )
 
     async def _sleep_interruptible(self, seconds: float) -> None:

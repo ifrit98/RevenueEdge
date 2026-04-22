@@ -57,6 +57,25 @@ def _sentry_init() -> None:
         logger.warning("Sentry init failed: %s", exc)
 
 
+async def _reap_stale_jobs(stop_event: asyncio.Event, interval: float = 120.0) -> None:
+    """Periodically reset jobs stuck in ``running`` state after worker crash."""
+    from .supabase_client import rpc
+
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval)
+            break
+        except asyncio.TimeoutError:
+            pass
+        try:
+            result = await rpc("reap_stale_running_jobs", {"p_stale_threshold": "10 minutes"})
+            count = getattr(result, "data", None) or 0
+            if count:
+                logger.info("Reaped %s stale running jobs", count)
+        except Exception as exc:
+            logger.warning("Reaper tick failed: %s", exc)
+
+
 async def _run_all(workers: List[BaseWorker]) -> None:
     stop_event = asyncio.Event()
 
@@ -74,6 +93,7 @@ async def _run_all(workers: List[BaseWorker]) -> None:
             pass
 
     tasks = [asyncio.create_task(w.run(), name=type(w).__name__) for w in workers]
+    tasks.append(asyncio.create_task(_reap_stale_jobs(stop_event), name="reaper"))
     await stop_event.wait()
     for task in tasks:
         task.cancel()

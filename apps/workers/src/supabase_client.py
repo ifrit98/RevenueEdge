@@ -30,11 +30,17 @@ def get_client() -> Client:
     return _client
 
 
-async def async_execute(query: Any) -> Any:
-    return await asyncio.to_thread(query.execute)
+_DEFAULT_TIMEOUT = 30.0
 
 
-async def rpc(name: str, params: Optional[dict] = None) -> Any:
+async def async_execute(query: Any, *, timeout: float = _DEFAULT_TIMEOUT) -> Any:
+    return await asyncio.wait_for(asyncio.to_thread(query.execute), timeout=timeout)
+
+
+async def rpc(name: str, params: Optional[dict] = None, *, timeout: float = _DEFAULT_TIMEOUT) -> Any:
     """Call a Postgres RPC via Supabase."""
     client = get_client()
-    return await asyncio.to_thread(client.rpc(name, params or {}).execute)
+    return await asyncio.wait_for(
+        asyncio.to_thread(client.rpc(name, params or {}).execute),
+        timeout=timeout,
+    )

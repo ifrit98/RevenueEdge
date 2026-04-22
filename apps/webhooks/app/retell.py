@@ -76,7 +76,11 @@ def _verify_signature(raw_body: bytes, signature: Optional[str]) -> None:
         raise HTTPException(status_code=500, detail="retell SDK not installed")
     if not secret:
         raise HTTPException(status_code=500, detail="Retell secret not configured")
-    if not retell_verify(raw_body.decode("utf-8"), secret, signature):
+    try:
+        body_str = raw_body.decode("utf-8")
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid UTF-8 in request body")
+    if not retell_verify(body_str, secret, signature):
         raise HTTPException(status_code=401, detail="Invalid signature")
 
 

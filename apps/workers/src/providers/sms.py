@@ -84,7 +84,7 @@ async def send_sms_retell(
                 delivered=True,
                 metadata=data,
             )
-    except httpx.HTTPError as exc:
+    except (httpx.HTTPError, httpx.RequestError, ValueError) as exc:
         logger.error("Retell SMS error: %s", exc)
         return await _send_sms_twilio_fallback(
             to_number=to_number,

@@ -77,12 +77,42 @@ async def upsert_contact(
         "email": email,
         "source_channel": source_channel,
     }
-    res = await async_execute(
-        client.table("contacts").insert({k: v for k, v in insert_row.items() if v is not None})
-    )
-    rows = getattr(res, "data", None) or []
-    if rows:
-        return rows[0]
+    try:
+        res = await async_execute(
+            client.table("contacts").insert({k: v for k, v in insert_row.items() if v is not None})
+        )
+        rows = getattr(res, "data", None) or []
+        if rows:
+            return rows[0]
+    except Exception as exc:
+        err_str = str(exc).lower()
+        if "unique" in err_str or "duplicate" in err_str or "23505" in err_str:
+            logger.info("Contact insert hit unique constraint — re-querying")
+            if phone_e164:
+                res = await async_execute(
+                    client.table("contacts")
+                    .select("id, business_id, name, phone_e164, email, tags, metadata")
+                    .eq("business_id", business_id)
+                    .eq("phone_e164", phone_e164)
+                    .limit(1)
+                )
+                rows = getattr(res, "data", None) or []
+                if rows:
+                    return rows[0]
+            if email:
+                res = await async_execute(
+                    client.table("contacts")
+                    .select("id, business_id, name, phone_e164, email, tags, metadata")
+                    .eq("business_id", business_id)
+                    .eq("email", email)
+                    .limit(1)
+                )
+                rows = getattr(res, "data", None) or []
+                if rows:
+                    return rows[0]
+        else:
+            raise
+
     logger.warning(
         "Contact insert returned no rows", extra={"business_id": business_id, "phone": phone_e164}
     )

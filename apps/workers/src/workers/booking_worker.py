@@ -31,6 +31,7 @@ from ..lib.channels import fetch_business
 from ..lib.google_calendar import (
     CalendarNotConnectedError,
     CalendarTokenError,
+    CalendarUnavailableError,
     cancel_event,
     compute_free_slots,
     create_event,
@@ -145,7 +146,7 @@ class BookingWorker(BaseWorker):
                     slot_duration_minutes=_DEFAULT_SLOT_MINUTES,
                 )
                 top_slots = free[:3]
-            except (CalendarNotConnectedError, CalendarTokenError) as exc:
+            except (CalendarNotConnectedError, CalendarTokenError, CalendarUnavailableError) as exc:
                 logger.warning("Calendar access failed: %s", exc)
                 return await self._callback_fallback(
                     client=client,
@@ -201,7 +202,7 @@ class BookingWorker(BaseWorker):
                 client_id=client_id,
                 client_secret=client_secret,
             )
-        except (CalendarNotConnectedError, CalendarTokenError) as exc:
+        except (CalendarNotConnectedError, CalendarTokenError, CalendarUnavailableError) as exc:
             return await self._callback_fallback(
                 client=client,
                 business_id=business_id,
@@ -422,12 +423,16 @@ class BookingWorker(BaseWorker):
         start_dt = datetime.fromisoformat(new_start)
         end_dt = datetime.fromisoformat(new_end) if new_end else start_dt + timedelta(minutes=_DEFAULT_SLOT_MINUTES)
 
+        updates = {
+            "start": {"dateTime": start_dt.isoformat(), "timeZone": "UTC"},
+            "end": {"dateTime": end_dt.isoformat(), "timeZone": "UTC"},
+        }
+
         try:
             await update_event(
                 business_id=business_id,
                 event_id=event_id,
-                start=start_dt,
-                end=end_dt,
+                updates=updates,
                 client_id=client_id,
                 client_secret=client_secret,
             )

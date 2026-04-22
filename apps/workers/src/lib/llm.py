@@ -220,24 +220,26 @@ async def classify_conversation(context: dict[str, Any]) -> dict[str, Any]:
             r = await client.post(_OPENAI_CHAT_URL, headers=headers, json=body)
             r.raise_for_status()
             data = r.json()
-    except httpx.HTTPError as exc:
+    except (httpx.HTTPError, httpx.RequestError, ValueError) as exc:
         logger.warning("LLM call failed (%s) — falling back to heuristic", exc)
         return _heuristic_fallback(context)
 
     try:
         content = data["choices"][0]["message"]["content"]
         parsed = json.loads(content)
+        if not isinstance(parsed, dict):
+            raise TypeError(f"Expected dict from LLM, got {type(parsed).__name__}")
+        parsed.setdefault("intent", "unknown")
+        parsed.setdefault("urgency", "unknown")
+        parsed.setdefault("confidence", 0.0)
+        parsed.setdefault("recommended_next_action", "handoff")
+        parsed.setdefault("fields_collected", {})
+        parsed.setdefault("reply_text", "")
+        parsed.setdefault("summary", "")
     except Exception as exc:  # noqa: BLE001
-        logger.warning("LLM returned unparseable JSON (%s) — falling back", exc)
+        logger.warning("LLM returned unparseable/invalid JSON (%s) — falling back", exc)
         return _heuristic_fallback(context)
 
-    parsed.setdefault("intent", "unknown")
-    parsed.setdefault("urgency", "unknown")
-    parsed.setdefault("confidence", 0.0)
-    parsed.setdefault("recommended_next_action", "handoff")
-    parsed.setdefault("fields_collected", {})
-    parsed.setdefault("reply_text", "")
-    parsed.setdefault("summary", "")
     parsed["_model"] = settings.llm_chat_model
     parsed["_usage"] = data.get("usage") or {}
 

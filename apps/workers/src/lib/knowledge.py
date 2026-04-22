@@ -35,23 +35,25 @@ async def embed_text(text: str) -> Optional[list[float]]:
         logger.debug("No OPENAI_API_KEY — skipping embedding")
         return None
 
-    cache_key = hashlib.md5(text[:512].encode()).hexdigest()  # noqa: S324
-
-    async with httpx.AsyncClient(timeout=20) as client:
-        resp = await client.post(
-            "https://api.openai.com/v1/embeddings",
-            headers={"Authorization": f"Bearer {settings.openai_api_key}"},
-            json={
-                "model": settings.llm_embedding_model,
-                "input": text[:8000],
-            },
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        vec = data["data"][0]["embedding"]
-        if len(vec) != _EMBED_DIM:
-            logger.warning("Unexpected embedding dim %d, expected %d", len(vec), _EMBED_DIM)
-        return vec
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.post(
+                "https://api.openai.com/v1/embeddings",
+                headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+                json={
+                    "model": settings.llm_embedding_model,
+                    "input": text[:8000],
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            vec = data["data"][0]["embedding"]
+            if len(vec) != _EMBED_DIM:
+                logger.warning("Unexpected embedding dim %d, expected %d", len(vec), _EMBED_DIM)
+            return vec
+    except Exception as exc:
+        logger.warning("embed_text failed (%s) — returning None (lexical-only fallback)", exc)
+        return None
 
 
 async def retrieve_knowledge(

@@ -38,6 +38,14 @@ class CalendarTokenError(Exception):
     pass
 
 
+class CalendarUnavailableError(Exception):
+    """Raised when Calendar API returns a non-200 or network error.
+
+    Callers should treat availability as *unknown* (not "fully free").
+    """
+    pass
+
+
 async def _get_calendar_config(business_id: str) -> dict:
     client = get_client()
     res = await async_execute(
@@ -67,16 +75,19 @@ async def _refresh_access_token(
     if not refresh_token:
         raise CalendarTokenError("No refresh token available")
 
-    async with httpx.AsyncClient(timeout=15) as http:
-        resp = await http.post(
-            _TOKEN_URL,
-            data={
-                "grant_type": "refresh_token",
-                "refresh_token": refresh_token,
-                "client_id": client_id,
-                "client_secret": client_secret,
-            },
-        )
+    try:
+        async with httpx.AsyncClient(timeout=15) as http:
+            resp = await http.post(
+                _TOKEN_URL,
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token,
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                },
+            )
+    except httpx.RequestError as exc:
+        raise CalendarUnavailableError(f"Token refresh network error: {exc}") from exc
 
     if resp.status_code != 200:
         logger.error("Token refresh failed: %s %s", resp.status_code, resp.text)
@@ -157,25 +168,33 @@ async def get_availability(
         "items": [{"id": calendar_id}],
     }
 
-    async with httpx.AsyncClient(timeout=15) as http:
-        resp = await http.post(
-            _FREEBUSY_URL,
-            json=body,
-            headers={"Authorization": f"Bearer {token}"},
-        )
-
-    if resp.status_code == 401:
-        token = await _refresh_access_token(business_id, gcal, client_id, client_secret)
+    try:
         async with httpx.AsyncClient(timeout=15) as http:
             resp = await http.post(
                 _FREEBUSY_URL,
                 json=body,
                 headers={"Authorization": f"Bearer {token}"},
             )
+    except httpx.RequestError as exc:
+        logger.error("FreeBusy network error: %s", exc)
+        raise CalendarUnavailableError(f"Network error: {exc}") from exc
+
+    if resp.status_code == 401:
+        token = await _refresh_access_token(business_id, gcal, client_id, client_secret)
+        try:
+            async with httpx.AsyncClient(timeout=15) as http:
+                resp = await http.post(
+                    _FREEBUSY_URL,
+                    json=body,
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+        except httpx.RequestError as exc:
+            logger.error("FreeBusy network error on retry: %s", exc)
+            raise CalendarUnavailableError(f"Network error: {exc}") from exc
 
     if resp.status_code != 200:
-        logger.error("FreeBusy query failed: %s", resp.text)
-        return []
+        logger.error("FreeBusy query failed: %s %s", resp.status_code, resp.text)
+        raise CalendarUnavailableError(f"FreeBusy returned {resp.status_code}")
 
     data = resp.json()
     calendars = data.get("calendars") or {}
@@ -245,21 +264,29 @@ async def create_event(
         event_body["attendees"] = [{"email": e} for e in attendees]
 
     url = f"{_CALENDAR_BASE}/calendars/{calendar_id}/events"
-    async with httpx.AsyncClient(timeout=15) as http:
-        resp = await http.post(
-            url,
-            json=event_body,
-            headers={"Authorization": f"Bearer {token}"},
-        )
-
-    if resp.status_code == 401:
-        token = await _refresh_access_token(business_id, gcal, client_id, client_secret)
+    try:
         async with httpx.AsyncClient(timeout=15) as http:
             resp = await http.post(
                 url,
                 json=event_body,
                 headers={"Authorization": f"Bearer {token}"},
             )
+    except httpx.RequestError as exc:
+        logger.error("Create event network error: %s", exc)
+        return None
+
+    if resp.status_code == 401:
+        token = await _refresh_access_token(business_id, gcal, client_id, client_secret)
+        try:
+            async with httpx.AsyncClient(timeout=15) as http:
+                resp = await http.post(
+                    url,
+                    json=event_body,
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+        except httpx.RequestError as exc:
+            logger.error("Create event network error on retry: %s", exc)
+            return None
 
     if resp.status_code not in (200, 201):
         logger.error("Create event failed: %s %s", resp.status_code, resp.text)
@@ -282,21 +309,29 @@ async def update_event(
     token = await _get_access_token(business_id, gcal, client_id, client_secret)
 
     url = f"{_CALENDAR_BASE}/calendars/{calendar_id}/events/{event_id}"
-    async with httpx.AsyncClient(timeout=15) as http:
-        resp = await http.patch(
-            url,
-            json=updates,
-            headers={"Authorization": f"Bearer {token}"},
-        )
-
-    if resp.status_code == 401:
-        token = await _refresh_access_token(business_id, gcal, client_id, client_secret)
+    try:
         async with httpx.AsyncClient(timeout=15) as http:
             resp = await http.patch(
                 url,
                 json=updates,
                 headers={"Authorization": f"Bearer {token}"},
             )
+    except httpx.RequestError as exc:
+        logger.error("Update event network error: %s", exc)
+        return False
+
+    if resp.status_code == 401:
+        token = await _refresh_access_token(business_id, gcal, client_id, client_secret)
+        try:
+            async with httpx.AsyncClient(timeout=15) as http:
+                resp = await http.patch(
+                    url,
+                    json=updates,
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+        except httpx.RequestError as exc:
+            logger.error("Update event network error on retry: %s", exc)
+            return False
 
     if resp.status_code != 200:
         logger.error("Update event failed: %s %s", resp.status_code, resp.text)
@@ -317,19 +352,27 @@ async def cancel_event(
     token = await _get_access_token(business_id, gcal, client_id, client_secret)
 
     url = f"{_CALENDAR_BASE}/calendars/{calendar_id}/events/{event_id}"
-    async with httpx.AsyncClient(timeout=15) as http:
-        resp = await http.delete(
-            url,
-            headers={"Authorization": f"Bearer {token}"},
-        )
-
-    if resp.status_code == 401:
-        token = await _refresh_access_token(business_id, gcal, client_id, client_secret)
+    try:
         async with httpx.AsyncClient(timeout=15) as http:
             resp = await http.delete(
                 url,
                 headers={"Authorization": f"Bearer {token}"},
             )
+    except httpx.RequestError as exc:
+        logger.error("Cancel event network error: %s", exc)
+        return False
+
+    if resp.status_code == 401:
+        token = await _refresh_access_token(business_id, gcal, client_id, client_secret)
+        try:
+            async with httpx.AsyncClient(timeout=15) as http:
+                resp = await http.delete(
+                    url,
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+        except httpx.RequestError as exc:
+            logger.error("Cancel event network error on retry: %s", exc)
+            return False
 
     if resp.status_code not in (200, 204):
         logger.error("Cancel event failed: %s %s", resp.status_code, resp.text)

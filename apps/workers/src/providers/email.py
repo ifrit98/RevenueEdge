@@ -53,7 +53,7 @@ def _send_via_sendgrid(
     attempt = 0
     while True:
         try:
-            with urllib.request.urlopen(request) as response:
+            with urllib.request.urlopen(request, timeout=30) as response:
                 return response.headers.get("X-Message-Id") or "sendgrid"
         except urllib.error.HTTPError as exc:  # pragma: no cover
             attempt += 1

@@ -35,7 +35,7 @@ class WebsiteIngestRequest(BaseModel):
 
 
 class GoogleDocIngestRequest(BaseModel):
-    doc_id: str = Field(..., min_length=10, description="Google Docs document ID")
+    doc_id: str = Field(..., min_length=10, pattern=r"^[a-zA-Z0-9_-]+$", description="Google Docs document ID")
     type: str = Field(default="product", pattern=r"^(faq|objection|product|policy|other)$")
 
 
@@ -70,6 +70,10 @@ async def ingest_document(
     user: dict = Depends(get_business_user),
 ) -> dict:
     """Upload a PDF/DOCX/TXT file. Parse, chunk, and create knowledge items inline."""
+    _VALID_TYPES = {"faq", "objection", "product", "policy", "other"}
+    if type not in _VALID_TYPES:
+        raise HTTPException(status_code=422, detail=f"Invalid type: must be one of {_VALID_TYPES}")
+
     if file.size and file.size > MAX_UPLOAD_SIZE:
         raise HTTPException(status_code=413, detail="File too large (10 MB max)")
 
@@ -92,6 +96,11 @@ async def ingest_document(
         raise HTTPException(status_code=400, detail=str(exc))
     except RuntimeError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("Document parse failed for %s: %s", filename, exc, exc_info=True)
+        raise HTTPException(status_code=422, detail=f"Failed to parse document: {exc.__class__.__name__}")
 
     return {"created": len(items), "items": [{"id": i["id"], "title": i["title"]} for i in items]}
 

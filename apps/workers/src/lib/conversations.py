@@ -170,15 +170,11 @@ async def update_conversation(
     if summary is not None:
         patch["summary"] = summary
     if metadata_patch:
-        # Shallow merge on the client side.
-        client = get_client()
-        existing = await async_execute(
-            client.table("conversations").select("metadata").eq("id", conversation_id).limit(1)
+        from ..supabase_client import rpc as _rpc
+        await _rpc(
+            "merge_conversation_metadata",
+            {"p_conversation_id": conversation_id, "p_patch": metadata_patch},
         )
-        rows = getattr(existing, "data", None) or []
-        base_meta = (rows[0] or {}).get("metadata") if rows else {}
-        merged = {**(base_meta or {}), **metadata_patch}
-        patch["metadata"] = merged
 
     if not patch:
         return
