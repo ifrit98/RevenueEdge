@@ -25,8 +25,11 @@ from .logging_config import setup_logging
 from .monitoring import capture_exception, init_sentry
 from .routes import (
     businesses as businesses_routes,
+    channels as channels_routes,
     conversations as conversations_routes,
     health as health_routes,
+    knowledge as knowledge_routes,
+    leads as leads_routes,
     metrics as metrics_routes,
     queue as queue_routes,
     tasks as tasks_routes,
@@ -67,7 +70,10 @@ app.add_middleware(
 app.include_router(health_routes.router)
 app.include_router(queue_routes.router)
 app.include_router(businesses_routes.router)
+app.include_router(channels_routes.router)
 app.include_router(conversations_routes.router)
+app.include_router(knowledge_routes.router)
+app.include_router(leads_routes.router)
 app.include_router(tasks_routes.router)
 app.include_router(metrics_routes.router)
 
