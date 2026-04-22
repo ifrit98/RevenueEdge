@@ -38,8 +38,11 @@ class FollowupSchedulerWorker(BaseWorker):
     queue_name = "follow-up-scheduler"
     max_concurrency = 2
 
+    _current_payload: Optional[dict] = None
+
     async def handle(self, job: Job) -> Optional[dict]:
         payload = job.payload or {}
+        self._current_payload = payload
         conversation_id = payload.get("conversation_id")
         business_id = job.business_id or payload.get("business_id")
         followup_type = payload.get("followup_type") or "no_reply_check"
@@ -80,6 +83,7 @@ class FollowupSchedulerWorker(BaseWorker):
         handler = {
             "after_hours_review": self._after_hours_review,
             "no_reply_check": self._no_reply_check,
+            "quote_recovery": self._quote_recovery,
         }.get(followup_type)
 
         if handler:
@@ -153,6 +157,69 @@ class FollowupSchedulerWorker(BaseWorker):
             "attempt": attempt + 1,
             "delay_hours": delay_hours,
         }
+
+    async def _quote_recovery(
+        self, *, conversation_id: str, business_id: str,
+        attempt: int, max_attempts: int, trace_id: Optional[str], job_id: str,
+    ) -> dict:
+        """Send a quote follow-up SMS, then re-enqueue for the next attempt."""
+        payload = self._current_payload or {}
+        delays_days = payload.get("delays_days") or [2, 4, 7]
+        quote_id = payload.get("quote_id")
+        lead_id = payload.get("lead_id")
+
+        template_map = {1: "quote_followup_1", 2: "quote_followup_2", 3: "quote_followup_final"}
+        template_name = template_map.get(attempt, "quote_followup_final")
+
+        await rpc(
+            "enqueue_job",
+            {
+                "p_queue_name": "outbound-actions",
+                "p_payload": {
+                    "action": "send_sms",
+                    "conversation_id": conversation_id,
+                    "business_id": business_id,
+                    "contact_id": payload.get("contact_id"),
+                    "template_name": template_name,
+                    "intent": "quote_followup",
+                    "trace_id": trace_id,
+                    "reason": f"quote_recovery_attempt_{attempt}",
+                },
+                "p_business_id": business_id,
+                "p_idempotency_key": f"ob:qr:{quote_id}:{attempt}",
+                "p_priority": 35,
+            },
+        )
+
+        if attempt < max_attempts:
+            delay_idx = min(attempt, len(delays_days) - 1)
+            delay = delays_days[delay_idx]
+            available_at = (datetime.now(timezone.utc) + timedelta(days=delay)).isoformat()
+            next_payload = {
+                **payload,
+                "attempt": attempt + 1,
+                "trace_id": trace_id,
+            }
+            await rpc(
+                "enqueue_job",
+                {
+                    "p_queue_name": "follow-up-scheduler",
+                    "p_payload": next_payload,
+                    "p_business_id": business_id,
+                    "p_idempotency_key": f"fu:qr:{quote_id}:{attempt + 1}",
+                    "p_priority": 40,
+                    "p_available_at": available_at,
+                },
+            )
+            return {"action": "sent_followup", "attempt": attempt, "next_delay_days": delay}
+
+        return await self._escalate(
+            conversation_id=conversation_id,
+            business_id=business_id,
+            followup_type="quote_recovery",
+            trace_id=trace_id,
+            job_id=job_id,
+        )
 
     async def _escalate(
         self, *, conversation_id: str, business_id: str,

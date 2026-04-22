@@ -42,7 +42,9 @@ URGENCY_VALUES = ["emergency", "same_day", "soon", "routine", "unknown"]
 NEXT_ACTIONS = [
     "send_sms_reply",
     "ask_followup",
+    "ask_question",
     "collect_quote_details",
+    "draft_quote",
     "schedule_callback",
     "handoff",
     "mark_resolved",
@@ -59,7 +61,9 @@ Return STRICT JSON with this shape (no prose):
   "confidence": number in [0,1],
   "recommended_next_action": one of NEXT_ACTIONS,
   "reply_text": string (<=320 chars) OR empty,
-  "fields_collected": { "key": "value" },
+  "fields_collected": { "field_name": "value" },
+  "service_id": "uuid or null (matched service from ## Available Services)",
+  "knowledge_missing": boolean (true only if knowledge section provided but no article covers the question),
   "handoff_reason": string (only if next_action is "handoff"),
   "summary": short recap <=200 chars
 }
@@ -72,6 +76,15 @@ Policies:
 - If a "## Business Knowledge" section is provided below, answer ONLY from those articles.
   If no article covers the customer's question, set "knowledge_missing": true in the response
   and reply with: "I want to make sure I give you the right answer. Let me have the team confirm and get back to you."
+
+## Field Collection (quote_request or booking_request)
+When the intent is quote_request or booking_request:
+1. Match the customer's request to a service from the "## Available Services" section below.
+2. Check which required_intake_fields for that service are still missing (compare against fields_collected).
+3. Set recommended_next_action = "ask_question" and write reply_text asking for exactly ONE missing field at a time.
+4. When all required fields are collected, set recommended_next_action = "draft_quote".
+5. If the customer provides unsolicited fields, capture them in fields_collected anyway.
+6. Include each extracted field in "fields_collected" keyed by the field name (e.g. "name", "address", "scope").
 """.replace(
     "INTENT_VALUES", ", ".join(f'"{v}"' for v in INTENT_VALUES)
 ).replace("URGENCY_VALUES", ", ".join(f'"{v}"' for v in URGENCY_VALUES)).replace(
@@ -117,6 +130,20 @@ def _format_messages_for_llm(context: dict[str, Any]) -> list[dict[str, str]]:
             body_text = (art.get("content") or art.get("body") or "")[:600]
             kb_lines.append(f"\n### Article {i}: {title}\n{body_text}")
         sections.append("\n".join(kb_lines))
+
+    services = context.get("services") or []
+    if services:
+        svc_lines = ["## Available Services"]
+        for svc in services[:10]:
+            req = ", ".join(svc.get("required_intake_fields") or []) or "(none)"
+            low = svc.get("base_price_low")
+            high = svc.get("base_price_high")
+            price = f"${low}–${high}" if low and high else f"from ${low}" if low else "TBD"
+            svc_lines.append(
+                f"- {svc['name']} (id={svc['id']}): "
+                f"price={price}, required_fields=[{req}]"
+            )
+        sections.append("\n".join(svc_lines))
 
     sections.append("\nRespond ONLY with the JSON object described in the system prompt.")
     user_prompt = "\n".join(sections)

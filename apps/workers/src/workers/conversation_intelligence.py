@@ -28,7 +28,12 @@ from ..lib.channels import fetch_business
 from ..lib.conversations import load_conversation_context, update_conversation
 from ..lib.hours import is_within_business_hours, next_business_open
 from ..lib.knowledge import retrieve_knowledge
-from ..lib.leads import advance_lead_stage, find_or_create_lead
+from ..lib.leads import (
+    advance_lead_stage,
+    check_required_fields_complete,
+    find_or_create_lead,
+    upsert_intake_fields,
+)
 from ..lib.llm import classify_conversation, coerce_confidence
 from ..supabase_client import async_execute, get_client, rpc
 
@@ -77,6 +82,22 @@ class ConversationIntelligenceWorker(BaseWorker):
             except Exception:
                 logger.warning("Knowledge retrieval failed", exc_info=True)
 
+        # --- Phase 3: Load active services for multi-turn intake ----------
+        services: list[dict] = []
+        if business_id:
+            try:
+                client = get_client()
+                svc_res = await async_execute(
+                    client.table("services")
+                    .select("id, name, description, base_price_low, base_price_high, required_intake_fields, tags")
+                    .eq("business_id", business_id)
+                    .eq("active", True)
+                    .limit(20)
+                )
+                services = getattr(svc_res, "data", None) or []
+            except Exception:
+                logger.warning("Services load failed", exc_info=True)
+
         llm_context = {
             "business": business,
             "contact": contact,
@@ -84,6 +105,7 @@ class ConversationIntelligenceWorker(BaseWorker):
             "messages": messages,
             "source_event_type": source_event_type,
             "knowledge_articles": kb_articles,
+            "services": services,
         }
 
         decision = await classify_conversation(llm_context)
@@ -158,7 +180,8 @@ class ConversationIntelligenceWorker(BaseWorker):
             },
         )
 
-        # --- Phase 2: Leads bridge ----------------------------------------
+        # --- Leads bridge + Phase 3 intake fields -------------------------
+        lead: dict | None = None
         if contact and business_id and intent not in {"unknown", "spam"}:
             try:
                 lead = await find_or_create_lead(
@@ -172,8 +195,10 @@ class ConversationIntelligenceWorker(BaseWorker):
                 stage_map = {
                     "send_sms_reply": "contacted",
                     "ask_followup": "contacted",
+                    "ask_question": "contacted",
                     "collect_quote_details": "qualified",
                     "schedule_callback": "qualified",
+                    "draft_quote": "qualified",
                     "handoff": None,
                 }
                 target_stage = stage_map.get(next_action)
@@ -183,6 +208,28 @@ class ConversationIntelligenceWorker(BaseWorker):
                         new_stage=target_stage,
                         metadata_patch={"last_intent": intent, "trace_id": trace_id},
                     )
+
+                fields_collected = decision.get("fields_collected") or {}
+                if fields_collected and lead:
+                    last_msg_id = None
+                    for m in reversed(messages):
+                        if m.get("direction") == "inbound":
+                            last_msg_id = m.get("id")
+                            break
+                    await upsert_intake_fields(
+                        lead_id=lead["id"],
+                        fields=fields_collected,
+                        source_message_id=last_msg_id,
+                    )
+
+                    service_id = decision.get("service_id") or lead.get("service_id")
+                    if service_id:
+                        complete, missing = await check_required_fields_complete(
+                            lead_id=lead["id"], service_id=service_id,
+                        )
+                        if complete and next_action in {"ask_question", "collect_quote_details"}:
+                            next_action = "draft_quote"
+
             except Exception:
                 logger.warning("Leads bridge failed", exc_info=True)
 
@@ -261,6 +308,49 @@ class ConversationIntelligenceWorker(BaseWorker):
                         conversation_id=conversation_id,
                         status="awaiting_customer",
                     )
+
+        elif next_action == "ask_question" and reply_text:
+            await rpc(
+                "enqueue_job",
+                {
+                    "p_queue_name": "outbound-actions",
+                    "p_payload": {
+                        "action": "send_sms",
+                        "conversation_id": conversation_id,
+                        "business_id": business_id,
+                        "contact_id": ctx["conversation"].get("contact_id"),
+                        "channel_id": ctx["conversation"].get("channel_id"),
+                        "body": reply_text,
+                        "intent": intent,
+                        "trace_id": trace_id,
+                        "reason": "intake_question",
+                    },
+                    "p_business_id": business_id,
+                    "p_idempotency_key": f"ob:ask-q:{job.id}",
+                    "p_priority": 20,
+                },
+            )
+            downstream.append("outbound-actions")
+
+        elif next_action == "draft_quote" and lead:
+            service_id = decision.get("service_id") or (lead or {}).get("service_id")
+            await rpc(
+                "enqueue_job",
+                {
+                    "p_queue_name": "quote-drafting",
+                    "p_payload": {
+                        "lead_id": lead["id"],
+                        "conversation_id": conversation_id,
+                        "business_id": business_id,
+                        "service_id": service_id,
+                        "trace_id": trace_id,
+                    },
+                    "p_business_id": business_id,
+                    "p_idempotency_key": f"qd:{job.id}",
+                    "p_priority": 15,
+                },
+            )
+            downstream.append("quote-drafting")
 
         elif next_action in {"collect_quote_details", "ask_followup", "schedule_callback"}:
             template_name = {

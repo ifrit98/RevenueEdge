@@ -20,6 +20,7 @@ from .workers.handoff import HandoffWorker
 from .workers.inbound_normalizer import InboundNormalizerWorker
 from .workers.knowledge_ingestion import KnowledgeIngestionWorker
 from .workers.outbound_action import OutboundActionWorker
+from .workers.quote_drafting import QuoteDraftingWorker
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -31,6 +32,7 @@ _REGISTRY: dict[str, type[BaseWorker]] = {
     "handoff": HandoffWorker,
     "followup_scheduler": FollowupSchedulerWorker,
     "knowledge_ingestion": KnowledgeIngestionWorker,
+    "quote_drafting": QuoteDraftingWorker,
 }
 
 

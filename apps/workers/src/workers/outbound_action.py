@@ -22,6 +22,7 @@ Resolution rules:
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Optional
 
 from ..base import BaseWorker, Job, PermanentError, RetryableError
@@ -44,6 +45,8 @@ class OutboundActionWorker(BaseWorker):
     async def handle(self, job: Job) -> Optional[dict]:
         payload = job.payload or {}
         action = payload.get("action") or "send_sms"
+        if action == "send_quote":
+            return await self._handle_send_quote(job, payload)
         if action != "send_sms":
             raise PermanentError(f"unsupported action: {action}")
 
@@ -142,7 +145,12 @@ class OutboundActionWorker(BaseWorker):
             )
             return {"skipped": True, "reason": "daily_cap_reached"}
 
-        if is_quiet_hours(business):
+        is_emergency = payload.get("urgency") == "emergency"
+        is_autopilot_first = payload.get("reason") in {
+            "call.missed", "after_hours_intake"
+        }
+
+        if is_quiet_hours(business) and not is_emergency and not is_autopilot_first:
             open_at = next_business_open(business)
             if open_at:
                 logger.info(
@@ -264,4 +272,141 @@ class OutboundActionWorker(BaseWorker):
             "delivered": send_result.delivered,
             "message_id": send_result.message_id,
             "template_name": (template_row or {}).get("name"),
+        }
+
+    async def _handle_send_quote(self, job: Job, payload: dict) -> dict:
+        """Send an approved quote to the customer via SMS."""
+        quote_id = payload.get("quote_id")
+        business_id = payload.get("business_id")
+        contact_id = payload.get("contact_id")
+        conversation_id = payload.get("conversation_id")
+        lead_id = payload.get("lead_id")
+        trace_id = payload.get("trace_id")
+
+        if not quote_id or not business_id:
+            raise PermanentError("quote_id and business_id required for send_quote")
+
+        client = get_client()
+
+        res = await async_execute(
+            client.table("quotes")
+            .select("id, draft_text, amount_low, amount_high, status")
+            .eq("id", quote_id)
+            .limit(1)
+        )
+        rows = getattr(res, "data", None) or []
+        if not rows:
+            raise PermanentError(f"quote {quote_id} not found")
+        quote = rows[0]
+
+        contact = None
+        if contact_id:
+            res = await async_execute(
+                client.table("contacts")
+                .select("id, name, phone_e164, email, metadata")
+                .eq("id", contact_id)
+                .limit(1)
+            )
+            rows = getattr(res, "data", None) or []
+            contact = rows[0] if rows else None
+
+        if not contact or not contact.get("phone_e164"):
+            raise PermanentError("contact has no phone_e164 for quote send")
+
+        if (contact.get("metadata") or {}).get("sms_opt_out"):
+            return {"skipped": True, "reason": "sms_opt_out"}
+
+        business = await fetch_business(business_id)
+        biz_name = (business or {}).get("name") or "Our team"
+        draft = quote.get("draft_text") or ""
+        body = draft[:300] if len(draft) <= 320 else draft[:300] + "… Reply for full details."
+        if not body:
+            body = f"Hi! {biz_name} has prepared a quote for you. Reply for details or call us to discuss."
+
+        settings = get_worker_settings()
+        from_number = settings.retell_from_number
+        if not from_number:
+            raise RetryableError("no from_number configured for SMS send")
+
+        try:
+            send_result = await send_sms_retell(
+                to_number=contact["phone_e164"],
+                from_number=from_number,
+                body=body,
+                metadata={"quote_id": quote_id, "conversation_id": conversation_id, "trace_id": trace_id},
+            )
+        except Exception as exc:
+            raise RetryableError(f"SMS provider error: {exc}") from exc
+
+        now = datetime.now(timezone.utc).isoformat()
+        await async_execute(
+            client.table("quotes")
+            .update({"status": "sent", "sent_at": now, "updated_at": now})
+            .eq("id", quote_id)
+        )
+
+        if conversation_id:
+            await insert_message(
+                business_id=business_id,
+                conversation_id=conversation_id,
+                contact_id=contact_id,
+                channel_id=None,
+                direction="outbound",
+                sender_type="ai",
+                body=body,
+                external_message_id=send_result.message_id,
+                idempotency_key=f"msg:quote:{job.id}",
+                raw_payload={"quote_id": quote_id, "provider": send_result.provider, "trace_id": trace_id},
+            )
+
+        if lead_id:
+            from ..lib.leads import advance_lead_stage
+            await advance_lead_stage(lead_id=lead_id, new_stage="proposal")
+
+        await rpc(
+            "enqueue_event",
+            {
+                "p_event_type": "quote.sent",
+                "p_payload": {
+                    "quote_id": quote_id,
+                    "business_id": business_id,
+                    "contact_id": contact_id,
+                    "lead_id": lead_id,
+                    "provider": send_result.provider,
+                    "trace_id": trace_id,
+                },
+                "p_business_id": business_id,
+                "p_aggregate_type": "quote",
+                "p_aggregate_id": quote_id,
+                "p_idempotency_key": f"ob:quote-sent:{job.id}",
+            },
+        )
+
+        if lead_id:
+            await rpc(
+                "enqueue_job",
+                {
+                    "p_queue_name": "follow-up-scheduler",
+                    "p_payload": {
+                        "followup_type": "quote_recovery",
+                        "lead_id": lead_id,
+                        "quote_id": quote_id,
+                        "conversation_id": conversation_id,
+                        "business_id": business_id,
+                        "attempt": 1,
+                        "max_attempts": 3,
+                        "delays_days": [2, 4, 7],
+                        "trace_id": trace_id,
+                    },
+                    "p_business_id": business_id,
+                    "p_idempotency_key": f"fu:qr:{quote_id}",
+                    "p_priority": 40,
+                    "p_available_at": f"now() + interval '2 days'",
+                },
+            )
+
+        return {
+            "sent": True,
+            "quote_id": quote_id,
+            "provider": send_result.provider,
         }

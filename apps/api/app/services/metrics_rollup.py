@@ -108,6 +108,21 @@ async def _count_bookings(*, business_id: str, start: str, end: str) -> int:
     return int(getattr(res, "count", None) or len(res.data or []))
 
 
+async def _count_tasks_by_type(*, business_id: str, task_type: str, start: str, end: str) -> int:
+    client = get_supabase_client()
+    if client is None:
+        return 0
+    res = await async_execute(
+        client.table("tasks")
+        .select("id", count="exact")
+        .eq("business_id", business_id)
+        .eq("task_type", task_type)
+        .gte("created_at", start)
+        .lt("created_at", end)
+    )
+    return int(getattr(res, "count", None) or len(res.data or []))
+
+
 async def _count_recovered(*, business_id: str, start: str, end: str) -> int:
     """Conversations with at least one outbound message on `metric_date`
     after an inbound message on same or prior day."""
@@ -166,6 +181,16 @@ async def _rollup_for_business(business_id: str, metric_date: date) -> bool:
     bookings = await _count_bookings(business_id=business_id, start=start, end=end)
     recovered = await _count_recovered(business_id=business_id, start=start, end=end)
 
+    knowledge_gaps = await _count_tasks_by_type(
+        business_id=business_id, task_type="knowledge_gap", start=start, end=end
+    )
+    after_hours_leads = await _count_events(
+        business_id=business_id,
+        event_type="followup.escalated",
+        start=start,
+        end=end,
+    )
+
     row = {
         "business_id": business_id,
         "metric_date": metric_date.isoformat(),
@@ -177,7 +202,11 @@ async def _rollup_for_business(business_id: str, metric_date: date) -> bool:
         "bookings": bookings,
         "wins": wins,
         "attributed_revenue": 0,
-        "payload": {"version": 1},
+        "payload": {
+            "version": 2,
+            "knowledge_gaps": knowledge_gaps,
+            "after_hours_leads": after_hours_leads,
+        },
     }
 
     # supabase-py upsert via `on_conflict`.

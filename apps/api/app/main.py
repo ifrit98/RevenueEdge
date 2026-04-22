@@ -32,6 +32,8 @@ from .routes import (
     leads as leads_routes,
     metrics as metrics_routes,
     queue as queue_routes,
+    quotes as quotes_routes,
+    services as services_routes,
     tasks as tasks_routes,
 )
 from .services.scheduler import start_scheduler, stop_scheduler
@@ -74,6 +76,8 @@ app.include_router(channels_routes.router)
 app.include_router(conversations_routes.router)
 app.include_router(knowledge_routes.router)
 app.include_router(leads_routes.router)
+app.include_router(quotes_routes.router)
+app.include_router(services_routes.router)
 app.include_router(tasks_routes.router)
 app.include_router(metrics_routes.router)
 

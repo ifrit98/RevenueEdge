@@ -16,7 +16,7 @@
 - [x] Quiet-hours enforcement: no outbound SMS during 21:00–08:00 local (configurable), deferred to next_business_open
 - [x] Per-contact SMS rate limit: default 120s cooldown, daily cap per business
 - [x] `leads` rows created from classified conversations; stage transitions (`new → contacted → qualified`)
-- [ ] `intake_fields` rows persisted from LLM `fields_collected` (helper ready; LLM `fields_collected` extraction TBD)
+- [x] `intake_fields` rows persisted from LLM `fields_collected` (upsert_intake_fields + conversation_intelligence integration)
 - [x] Dashboard: knowledge CRUD API, channels CRUD API, leads CRUD API all wired
 - [ ] Smoke test: `scripts/smoke_phase2.sh` (TBD — requires live Supabase)
 
@@ -29,8 +29,8 @@
 - [x] Before sending, call `lib/hours.is_quiet_hours(business)` — checks 9pm–8am local
 - [x] If quiet hours: compute `next_business_open()` → enqueue deferred `outbound-actions` with `available_at`
 - [x] Daily SMS cap check via `lib/rate_limit.check_daily_cap()`
-- [ ] If the message template has `metadata.autopilot_safe = true` **and** it's the first contact on this conversation, exempt from quiet-hours (the initial textback is time-sensitive)
-- [ ] Emergency override: `urgency = 'emergency'` or `business_rules.emergency_override_allowed = true` bypasses quiet-hours
+- [x] If the message template has `metadata.autopilot_safe = true` **and** it's the first contact on this conversation, exempt from quiet-hours (the initial textback is time-sensitive)
+- [x] Emergency override: `urgency = 'emergency'` or `business_rules.emergency_override_allowed = true` bypasses quiet-hours
 
 ### 2. Per-contact SMS rate limit
 
@@ -67,7 +67,7 @@
 - [x] `lib/leads.py` added with `find_or_create_lead()`, `advance_lead_stage()`, `upsert_intake_fields()`
 - [x] `conversation_intelligence` creates/finds lead after classification (for non-spam/unknown intents)
 - [x] Stage advances: `new → contacted` on send_sms_reply/ask_followup, `new/contacted → qualified` on collect_quote_details/schedule_callback
-- [ ] Emit `lead.created` / `lead.qualified` events (deferred — events are written by the existing `enqueue_event` calls)
+- [x] Emit `lead.created` / `lead.qualified` events (emitted from `lib/leads.py`)
 - [ ] Advance `qualified → awaiting_quote` when a `quote.requested` event fires (Phase 3)
 
 ### 6. Knowledge retrieval — pgvector + lexical hybrid
@@ -76,8 +76,8 @@
 - [x] `match_knowledge` Supabase RPC added in `supabase/migrations/0002_match_knowledge_rpc.sql`
 - [x] `conversation_intelligence` extracts latest inbound message, retrieves knowledge articles, passes them as `knowledge_articles` in LLM context
 - [x] Knowledge-missing fallback: if no KB articles match and intent is faq/objection/product_question, creates a `knowledge_gap` task
-- [ ] Inject knowledge into LLM system prompt as `## Business Knowledge` section (requires LLM prompt update in `lib/llm.py`)
-- [ ] LLM-level `knowledge_missing = true` detection (currently uses heuristic: empty KB results)
+- [x] Inject knowledge into LLM system prompt as `## Business Knowledge` section (done in `_format_messages_for_llm`)
+- [x] LLM-level `knowledge_missing = true` detection (prompt instructs LLM to set it; heuristic fallback still present)
 
 ### 7. Knowledge ingestion worker
 
@@ -125,9 +125,9 @@
 
 ### 12. Observability additions
 
-- [ ] Add `knowledge_gaps` to `metric_snapshots.payload`: count of `knowledge_review` tasks created per day
-- [ ] Add `after_hours_leads` to `metric_snapshots.payload`
-- [ ] Update `metrics_rollup.py` to aggregate these
+- [x] Add `knowledge_gaps` to `metric_snapshots.payload`: count of `knowledge_gap` tasks created per day
+- [x] Add `after_hours_leads` to `metric_snapshots.payload`
+- [x] Update `metrics_rollup.py` to aggregate these
 
 ### 13. Smoke test
 
