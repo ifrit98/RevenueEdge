@@ -27,6 +27,8 @@ from typing import Optional
 from ..base import BaseWorker, Job, PermanentError, RetryableError
 from ..lib.channels import fetch_business
 from ..lib.conversations import insert_message
+from ..lib.hours import is_quiet_hours, next_business_open
+from ..lib.rate_limit import check_daily_cap, check_sms_rate_limit
 from ..lib.templates import build_render_context, load_template, render_template
 from ..providers.sms import send_sms_retell
 from ..settings import get_worker_settings
@@ -105,6 +107,61 @@ class OutboundActionWorker(BaseWorker):
                 },
             )
             return {"skipped": True, "reason": "sms_opt_out"}
+
+        biz_settings = business.get("settings") or {} if business else {}
+        cooldown = biz_settings.get("sms_rate_limit_seconds")
+        remaining = await check_sms_rate_limit(
+            contact_id=contact_id,
+            business_id=business_id,
+            cooldown_seconds=cooldown,
+        )
+        if remaining > 0:
+            logger.info(
+                "Rate limit active — deferring SMS by %.0fs",
+                remaining,
+                extra={"contact_id": contact_id, "remaining": remaining},
+            )
+            await rpc(
+                "enqueue_job",
+                {
+                    "p_queue_name": "outbound-actions",
+                    "p_payload": payload,
+                    "p_business_id": business_id,
+                    "p_idempotency_key": f"ob:defer:{job.id}",
+                    "p_priority": payload.get("priority", 50),
+                    "p_available_at": f"now() + interval '{int(remaining)} seconds'",
+                },
+            )
+            return {"deferred": True, "reason": "rate_limit", "deferred_seconds": remaining}
+
+        daily_cap = biz_settings.get("sms_daily_cap")
+        if await check_daily_cap(business_id=business_id, daily_cap=daily_cap):
+            logger.warning(
+                "Daily SMS cap reached",
+                extra={"business_id": business_id},
+            )
+            return {"skipped": True, "reason": "daily_cap_reached"}
+
+        if is_quiet_hours(business):
+            open_at = next_business_open(business)
+            if open_at:
+                logger.info(
+                    "Quiet hours — deferring SMS until %s", open_at.isoformat(),
+                    extra={"business_id": business_id},
+                )
+                await rpc(
+                    "enqueue_job",
+                    {
+                        "p_queue_name": "outbound-actions",
+                        "p_payload": payload,
+                        "p_business_id": business_id,
+                        "p_idempotency_key": f"ob:quiet:{job.id}",
+                        "p_priority": payload.get("priority", 50),
+                        "p_available_at": open_at.isoformat(),
+                    },
+                )
+                return {"deferred": True, "reason": "quiet_hours", "deferred_until": open_at.isoformat()}
+            return {"skipped": True, "reason": "quiet_hours_no_open_at"}
 
         body = (payload.get("body") or "").strip()
         template_row = None

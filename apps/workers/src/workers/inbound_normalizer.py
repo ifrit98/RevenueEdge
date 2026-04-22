@@ -17,6 +17,7 @@ Responsibilities:
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Optional
 
 from ..base import BaseWorker, Job, PermanentError
@@ -35,6 +36,10 @@ _EVENT_CHANNEL_HINT = {
     "call.started": "phone",
     "message.received": "sms",
 }
+
+_STOP_KEYWORDS = {"stop", "unsubscribe", "cancel", "quit", "end"}
+_START_KEYWORDS = {"start", "unstop", "subscribe", "resume", "yes"}
+_HELP_KEYWORDS = {"help", "info"}
 
 
 class InboundNormalizerWorker(BaseWorker):
@@ -118,6 +123,24 @@ class InboundNormalizerWorker(BaseWorker):
                 idempotency_key=f"msg:inbound:{event_type}:{external_message_id}" if external_message_id else None,
                 raw_payload=payload,
             )
+
+        # STOP / START / HELP compliance (SMS only).
+        if event_type == "message.received" and body and contact:
+            sms_command = self._detect_sms_command(body)
+            if sms_command:
+                await self._handle_sms_command(
+                    sms_command, contact=contact, business_id=business_id,
+                    conversation=conversation, trace_id=trace_id, job_id=job.id,
+                )
+                if sms_command in ("stop", "help"):
+                    return {
+                        "normalized": True,
+                        "event_type": event_type,
+                        "sms_command": sms_command,
+                        "business_id": business_id,
+                        "contact_id": contact.get("id"),
+                        "downstream": [],
+                    }
 
         # Audit event.
         await rpc(
@@ -218,3 +241,105 @@ class InboundNormalizerWorker(BaseWorker):
         if event_type == "call.ended":
             return None
         return None
+
+    @staticmethod
+    def _detect_sms_command(body: str) -> Optional[str]:
+        """Return ``'stop'``, ``'start'``, ``'help'``, or None."""
+        token = body.strip().lower()
+        if token in _STOP_KEYWORDS:
+            return "stop"
+        if token in _START_KEYWORDS:
+            return "start"
+        if token in _HELP_KEYWORDS:
+            return "help"
+        return None
+
+    @staticmethod
+    async def _handle_sms_command(
+        command: str,
+        *,
+        contact: dict,
+        business_id: str,
+        conversation: Optional[dict],
+        trace_id: Optional[str],
+        job_id: str,
+    ) -> None:
+        from ..supabase_client import async_execute, get_client
+
+        client = get_client()
+        contact_id = contact["id"]
+
+        if command == "stop":
+            existing_meta = contact.get("metadata") or {}
+            existing_meta["sms_opt_out"] = True
+            existing_meta["sms_opt_out_at"] = datetime.now(timezone.utc).isoformat()
+            await async_execute(
+                client.table("contacts")
+                .update({"metadata": existing_meta})
+                .eq("id", contact_id)
+            )
+            logger.info("Contact opted out of SMS", extra={"contact_id": contact_id})
+            await rpc(
+                "enqueue_event",
+                {
+                    "p_event_type": "contact.sms_opt_out",
+                    "p_payload": {
+                        "contact_id": contact_id,
+                        "business_id": business_id,
+                        "trace_id": trace_id,
+                    },
+                    "p_business_id": business_id,
+                    "p_aggregate_type": "contact",
+                    "p_aggregate_id": contact_id,
+                    "p_idempotency_key": f"optout:{job_id}",
+                },
+            )
+
+        elif command == "start":
+            existing_meta = contact.get("metadata") or {}
+            existing_meta.pop("sms_opt_out", None)
+            existing_meta["sms_opt_in_at"] = datetime.now(timezone.utc).isoformat()
+            await async_execute(
+                client.table("contacts")
+                .update({"metadata": existing_meta})
+                .eq("id", contact_id)
+            )
+            logger.info("Contact opted back into SMS", extra={"contact_id": contact_id})
+            await rpc(
+                "enqueue_event",
+                {
+                    "p_event_type": "contact.sms_opt_in",
+                    "p_payload": {
+                        "contact_id": contact_id,
+                        "business_id": business_id,
+                        "trace_id": trace_id,
+                    },
+                    "p_business_id": business_id,
+                    "p_aggregate_type": "contact",
+                    "p_aggregate_id": contact_id,
+                    "p_idempotency_key": f"optin:{job_id}",
+                },
+            )
+
+        elif command == "help":
+            await rpc(
+                "enqueue_job",
+                {
+                    "p_queue_name": "outbound-actions",
+                    "p_payload": {
+                        "action": "send_sms",
+                        "conversation_id": (conversation or {}).get("id"),
+                        "business_id": business_id,
+                        "contact_id": contact_id,
+                        "body": (
+                            "Reply STOP to opt out. Reply START to opt back in. "
+                            "For assistance, contact us directly. Msg & data rates may apply."
+                        ),
+                        "trace_id": trace_id,
+                        "reason": "help_response",
+                    },
+                    "p_business_id": business_id,
+                    "p_idempotency_key": f"help:{job_id}",
+                    "p_priority": 5,
+                },
+            )

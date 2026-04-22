@@ -69,6 +69,9 @@ Policies:
 - Emergencies, complaints, and sensitive topics → handoff.
 - If confidence < 0.72 → recommend "handoff".
 - Keep replies warm, brief, and oriented toward collecting the next useful detail.
+- If a "## Business Knowledge" section is provided below, answer ONLY from those articles.
+  If no article covers the customer's question, set "knowledge_missing": true in the response
+  and reply with: "I want to make sure I give you the right answer. Let me have the team confirm and get back to you."
 """.replace(
     "INTENT_VALUES", ", ".join(f'"{v}"' for v in INTENT_VALUES)
 ).replace("URGENCY_VALUES", ", ".join(f'"{v}"' for v in URGENCY_VALUES)).replace(
@@ -81,6 +84,8 @@ def _format_messages_for_llm(context: dict[str, Any]) -> list[dict[str, str]]:
     contact = context.get("contact") or {}
     conversation = context.get("conversation") or {}
     history = context.get("messages") or []
+
+    kb_articles = context.get("knowledge_articles") or []
 
     header_lines = [
         f"Business: {business.get('name') or '(unknown)'}",
@@ -99,13 +104,23 @@ def _format_messages_for_llm(context: dict[str, Any]) -> list[dict[str, str]]:
             continue
         transcript_lines.append(f"- [{role}/{who}] {body}")
 
-    user_prompt = (
-        "Context:\n"
-        + "\n".join(header_lines)
-        + "\n\nRecent messages (oldest → newest):\n"
-        + ("\n".join(transcript_lines) if transcript_lines else "(no prior messages)")
-        + "\n\nRespond ONLY with the JSON object described in the system prompt."
-    )
+    sections = [
+        "Context:\n" + "\n".join(header_lines),
+        "\nRecent messages (oldest → newest):\n"
+        + ("\n".join(transcript_lines) if transcript_lines else "(no prior messages)"),
+    ]
+
+    if kb_articles:
+        kb_lines = ["## Business Knowledge"]
+        for i, art in enumerate(kb_articles[:5], 1):
+            title = art.get("title") or "(untitled)"
+            body_text = (art.get("body") or "")[:600]
+            kb_lines.append(f"\n### Article {i}: {title}\n{body_text}")
+        sections.append("\n".join(kb_lines))
+
+    sections.append("\nRespond ONLY with the JSON object described in the system prompt.")
+    user_prompt = "\n".join(sections)
+
     return [
         {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},

@@ -18,6 +18,7 @@ from .workers.conversation_intelligence import ConversationIntelligenceWorker
 from .workers.followup_scheduler import FollowupSchedulerWorker
 from .workers.handoff import HandoffWorker
 from .workers.inbound_normalizer import InboundNormalizerWorker
+from .workers.knowledge_ingestion import KnowledgeIngestionWorker
 from .workers.outbound_action import OutboundActionWorker
 
 setup_logging()
@@ -29,6 +30,7 @@ _REGISTRY: dict[str, type[BaseWorker]] = {
     "outbound_action": OutboundActionWorker,
     "handoff": HandoffWorker,
     "followup_scheduler": FollowupSchedulerWorker,
+    "knowledge_ingestion": KnowledgeIngestionWorker,
 }
 
 

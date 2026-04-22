@@ -51,7 +51,7 @@ class WorkerSettings(BaseSettings):
     worker_lock_timeout_seconds: int = 300
 
     # Comma-separated list of worker names to enable in this process.
-    workers: str = "inbound_normalizer,conversation_intelligence,outbound_action,handoff,followup_scheduler"
+    workers: str = "inbound_normalizer,conversation_intelligence,outbound_action,handoff,followup_scheduler,knowledge_ingestion"
 
     @property
     def enabled_workers(self) -> List[str]:

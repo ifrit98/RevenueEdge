@@ -10,6 +10,12 @@ conversation row + an event, and dispatch the next step:
   - schedule_callback       → outbound-actions w/ template=callback_scheduling
   - handoff                 → human-handoff
   - mark_resolved / noop    → no downstream job
+
+Phase 2 additions:
+  - After-hours branch: auto after-hours intake + deferred follow-up
+  - Knowledge injection: retrieve relevant KB articles for LLM context
+  - Leads bridge: find_or_create_lead, advance stage on classification
+  - Knowledge-missing fallback: create a review task if KB has no match
 """
 
 from __future__ import annotations
@@ -20,8 +26,11 @@ from typing import Optional
 from ..base import BaseWorker, Job, PermanentError
 from ..lib.channels import fetch_business
 from ..lib.conversations import load_conversation_context, update_conversation
+from ..lib.hours import is_within_business_hours, next_business_open
+from ..lib.knowledge import retrieve_knowledge
+from ..lib.leads import advance_lead_stage, find_or_create_lead
 from ..lib.llm import classify_conversation, coerce_confidence
-from ..supabase_client import rpc
+from ..supabase_client import async_execute, get_client, rpc
 
 logger = logging.getLogger(__name__)
 
@@ -48,12 +57,33 @@ class ConversationIntelligenceWorker(BaseWorker):
             raise PermanentError(f"conversation {conversation_id} not found")
 
         business = await fetch_business(business_id) if business_id else None
+        contact = ctx.get("contact")
+        messages = ctx.get("messages") or []
+
+        # --- Phase 2: Knowledge injection ---------------------------------
+        kb_articles: list[dict] = []
+        latest_body = ""
+        for m in reversed(messages):
+            if m.get("direction") == "inbound" and m.get("body"):
+                latest_body = m["body"]
+                break
+        if latest_body and business_id:
+            try:
+                kb_articles = await retrieve_knowledge(
+                    business_id=business_id,
+                    query=latest_body,
+                    limit=3,
+                )
+            except Exception:
+                logger.warning("Knowledge retrieval failed", exc_info=True)
+
         llm_context = {
             "business": business,
-            "contact": ctx.get("contact"),
+            "contact": contact,
             "conversation": ctx.get("conversation"),
-            "messages": ctx.get("messages") or [],
+            "messages": messages,
             "source_event_type": source_event_type,
+            "knowledge_articles": kb_articles,
         }
 
         decision = await classify_conversation(llm_context)
@@ -72,6 +102,19 @@ class ConversationIntelligenceWorker(BaseWorker):
             )
             next_action = "handoff"
 
+        # --- Phase 2: After-hours branch ----------------------------------
+        after_hours = False
+        if business and not is_within_business_hours(business):
+            after_hours = True
+            if intent != "emergency" and next_action not in {"handoff", "noop", "mark_resolved"}:
+                next_action = "send_sms_reply"
+                reply_text = (
+                    decision.get("after_hours_reply")
+                    or f"Thanks for reaching out! We're currently outside of business hours "
+                    f"but we received your message and will follow up first thing. "
+                    f"If this is urgent, please call back during business hours."
+                )
+
         await update_conversation(
             conversation_id=conversation_id,
             current_intent=intent,
@@ -84,6 +127,8 @@ class ConversationIntelligenceWorker(BaseWorker):
                     "model": decision.get("_model"),
                     "trace_id": trace_id,
                     "fields_collected": decision.get("fields_collected") or {},
+                    "after_hours": after_hours,
+                    "kb_articles_used": len(kb_articles),
                 }
             },
         )
@@ -103,6 +148,8 @@ class ConversationIntelligenceWorker(BaseWorker):
                     "model": decision.get("_model"),
                     "usage": decision.get("_usage"),
                     "summary": summary,
+                    "after_hours": after_hours,
+                    "kb_articles_used": len(kb_articles),
                 },
                 "p_business_id": business_id,
                 "p_aggregate_type": "conversation",
@@ -111,6 +158,57 @@ class ConversationIntelligenceWorker(BaseWorker):
             },
         )
 
+        # --- Phase 2: Leads bridge ----------------------------------------
+        if contact and business_id and intent not in {"unknown", "spam"}:
+            try:
+                lead = await find_or_create_lead(
+                    business_id=business_id,
+                    contact_id=contact["id"],
+                    conversation_id=conversation_id,
+                    source=source_event_type or "inbound",
+                    initial_intent=intent,
+                    trace_id=trace_id,
+                )
+                stage_map = {
+                    "send_sms_reply": "contacted",
+                    "ask_followup": "contacted",
+                    "collect_quote_details": "qualified",
+                    "schedule_callback": "qualified",
+                    "handoff": None,
+                }
+                target_stage = stage_map.get(next_action)
+                if target_stage and lead.get("stage") in {"new", "contacted"}:
+                    await advance_lead_stage(
+                        lead_id=lead["id"],
+                        new_stage=target_stage,
+                        metadata_patch={"last_intent": intent, "trace_id": trace_id},
+                    )
+            except Exception:
+                logger.warning("Leads bridge failed", exc_info=True)
+
+        # --- Phase 2: Knowledge-missing fallback --------------------------
+        if not kb_articles and intent in {"faq", "objection", "product_question"} and business_id:
+            try:
+                client = get_client()
+                await async_execute(
+                    client.table("tasks").insert({
+                        "business_id": business_id,
+                        "conversation_id": conversation_id,
+                        "task_type": "knowledge_gap",
+                        "title": f"Knowledge gap: {intent} — {(latest_body or '')[:80]}",
+                        "priority": "medium",
+                        "status": "open",
+                        "metadata": {
+                            "intent": intent,
+                            "query_text": latest_body[:200] if latest_body else None,
+                            "trace_id": trace_id,
+                        },
+                    })
+                )
+            except Exception:
+                logger.warning("Failed to create knowledge-gap task", exc_info=True)
+
+        # --- Dispatch downstream ------------------------------------------
         downstream: list[str] = []
 
         if next_action == "send_sms_reply" and reply_text:
@@ -127,7 +225,7 @@ class ConversationIntelligenceWorker(BaseWorker):
                         "body": reply_text,
                         "intent": intent,
                         "trace_id": trace_id,
-                        "reason": "ai_reply",
+                        "reason": "after_hours_intake" if after_hours else "ai_reply",
                     },
                     "p_business_id": business_id,
                     "p_idempotency_key": f"ob:ai-reply:{job.id}",
@@ -135,6 +233,34 @@ class ConversationIntelligenceWorker(BaseWorker):
                 },
             )
             downstream.append("outbound-actions")
+
+            # After-hours: also schedule a follow-up at next business open.
+            if after_hours:
+                open_at = next_business_open(business)
+                if open_at:
+                    await rpc(
+                        "enqueue_job",
+                        {
+                            "p_queue_name": "follow-up-scheduler",
+                            "p_payload": {
+                                "conversation_id": conversation_id,
+                                "business_id": business_id,
+                                "followup_type": "after_hours_review",
+                                "attempt": 1,
+                                "max_attempts": 1,
+                                "trace_id": trace_id,
+                            },
+                            "p_business_id": business_id,
+                            "p_idempotency_key": f"fu:after:{job.id}",
+                            "p_priority": 30,
+                            "p_available_at": open_at.isoformat(),
+                        },
+                    )
+                    downstream.append("follow-up-scheduler")
+                    await update_conversation(
+                        conversation_id=conversation_id,
+                        status="awaiting_customer",
+                    )
 
         elif next_action in {"collect_quote_details", "ask_followup", "schedule_callback"}:
             template_name = {
@@ -192,6 +318,8 @@ class ConversationIntelligenceWorker(BaseWorker):
             "urgency": urgency,
             "confidence": confidence,
             "next_action": next_action,
+            "after_hours": after_hours,
+            "kb_articles_used": len(kb_articles),
             "downstream": downstream,
             "model": decision.get("_model"),
         }
