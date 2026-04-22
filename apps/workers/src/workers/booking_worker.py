@@ -373,15 +373,95 @@ class BookingWorker(BaseWorker):
             "calendar_event_id": event_id,
         }
 
+    _TIME_OF_DAY = {
+        "morning": 9,
+        "late morning": 10,
+        "midday": 12,
+        "noon": 12,
+        "afternoon": 13,
+        "late afternoon": 15,
+        "evening": 17,
+        "night": 18,
+    }
+
+    _DOW = {
+        "monday": 0, "mon": 0,
+        "tuesday": 1, "tue": 1, "tues": 1,
+        "wednesday": 2, "wed": 2,
+        "thursday": 3, "thu": 3, "thur": 3, "thurs": 3,
+        "friday": 4, "fri": 4,
+        "saturday": 5, "sat": 5,
+        "sunday": 6, "sun": 6,
+    }
+
     def _resolve_preferred_time(
         self, preferred_time: Optional[str], tz_name: str
     ) -> Optional[datetime]:
+        """Parse ISO datetime, or fuzzy strings like 'Thursday morning', 'next Tuesday'."""
         if not preferred_time:
             return None
+
         try:
             return datetime.fromisoformat(preferred_time)
         except (ValueError, TypeError):
             pass
+
+        try:
+            import zoneinfo
+            biz_tz = zoneinfo.ZoneInfo(tz_name)
+        except Exception:
+            biz_tz = timezone.utc
+
+        now_local = datetime.now(biz_tz)
+        text = preferred_time.strip().lower()
+
+        target_dow: Optional[int] = None
+        target_hour: int = 9
+
+        for pattern, hour in self._TIME_OF_DAY.items():
+            if pattern in text:
+                target_hour = hour
+                break
+
+        for pattern, dow in self._DOW.items():
+            if pattern in text:
+                target_dow = dow
+                break
+
+        if "today" in text:
+            candidate = now_local.replace(hour=target_hour, minute=0, second=0, microsecond=0)
+            if candidate <= now_local:
+                candidate += timedelta(days=1)
+            return candidate.astimezone(timezone.utc)
+
+        if "tomorrow" in text:
+            candidate = (now_local + timedelta(days=1)).replace(
+                hour=target_hour, minute=0, second=0, microsecond=0
+            )
+            return candidate.astimezone(timezone.utc)
+
+        if "next week" in text:
+            days_ahead = 7 - now_local.weekday()
+            candidate = (now_local + timedelta(days=days_ahead)).replace(
+                hour=target_hour, minute=0, second=0, microsecond=0
+            )
+            return candidate.astimezone(timezone.utc)
+
+        if target_dow is not None:
+            days_ahead = (target_dow - now_local.weekday()) % 7
+            if days_ahead == 0:
+                days_ahead = 7
+            candidate = (now_local + timedelta(days=days_ahead)).replace(
+                hour=target_hour, minute=0, second=0, microsecond=0
+            )
+            return candidate.astimezone(timezone.utc)
+
+        if any(k in text for k in self._TIME_OF_DAY):
+            candidate = now_local.replace(hour=target_hour, minute=0, second=0, microsecond=0)
+            if candidate <= now_local:
+                candidate += timedelta(days=1)
+            return candidate.astimezone(timezone.utc)
+
         return None
 
     def _format_slot_offer(self, slots: list[dict], business: Optional[dict]) -> str:

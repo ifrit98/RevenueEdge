@@ -171,6 +171,70 @@ async def _count_recovered(*, business_id: str, start: str, end: str) -> int:
     return len(conv_ids)
 
 
+async def _avg_response_seconds(*, business_id: str, start: str, end: str) -> Optional[float]:
+    """Median seconds between first inbound and first outbound message per
+    conversation that had activity on the metric date.  Returns None when
+    there are no qualifying conversations."""
+    client = get_supabase_client()
+    if client is None:
+        return None
+
+    inbound = await async_execute(
+        client.table("messages")
+        .select("conversation_id, created_at")
+        .eq("business_id", business_id)
+        .eq("direction", "inbound")
+        .gte("created_at", start)
+        .lt("created_at", end)
+        .order("created_at", desc=False)
+    )
+    conv_first_in: dict[str, str] = {}
+    for row in inbound.data or []:
+        cid = row["conversation_id"]
+        if cid not in conv_first_in:
+            conv_first_in[cid] = row["created_at"]
+
+    if not conv_first_in:
+        return None
+
+    outbound = await async_execute(
+        client.table("messages")
+        .select("conversation_id, created_at")
+        .eq("business_id", business_id)
+        .eq("direction", "outbound")
+        .gte("created_at", start)
+        .lt("created_at", end)
+        .order("created_at", desc=False)
+    )
+    conv_first_out: dict[str, str] = {}
+    for row in outbound.data or []:
+        cid = row["conversation_id"]
+        if cid not in conv_first_out:
+            conv_first_out[cid] = row["created_at"]
+
+    from datetime import datetime as _dt
+
+    deltas: list[float] = []
+    for cid, in_ts in conv_first_in.items():
+        out_ts = conv_first_out.get(cid)
+        if not out_ts:
+            continue
+        t_in = _dt.fromisoformat(in_ts.replace("Z", "+00:00"))
+        t_out = _dt.fromisoformat(out_ts.replace("Z", "+00:00"))
+        diff = (t_out - t_in).total_seconds()
+        if diff >= 0:
+            deltas.append(diff)
+
+    if not deltas:
+        return None
+
+    deltas.sort()
+    mid = len(deltas) // 2
+    if len(deltas) % 2 == 0:
+        return (deltas[mid - 1] + deltas[mid]) / 2
+    return deltas[mid]
+
+
 async def _rollup_for_business(business_id: str, metric_date: date) -> bool:
     client = get_supabase_client()
     if client is None:
@@ -221,6 +285,9 @@ async def _rollup_for_business(business_id: str, metric_date: date) -> bool:
         start=start,
         end=end,
     )
+    avg_resp = await _avg_response_seconds(
+        business_id=business_id, start=start, end=end
+    )
 
     row = {
         "business_id": business_id,
@@ -234,9 +301,10 @@ async def _rollup_for_business(business_id: str, metric_date: date) -> bool:
         "wins": wins,
         "attributed_revenue": attributed_revenue,
         "payload": {
-            "version": 2,
+            "version": 3,
             "knowledge_gaps": knowledge_gaps,
             "after_hours_leads": after_hours_leads,
+            "avg_response_seconds": avg_resp,
         },
     }
 

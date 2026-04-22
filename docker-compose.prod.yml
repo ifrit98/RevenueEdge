@@ -1,0 +1,190 @@
+##
+## Revenue Edge — Production Docker Compose
+##
+## Usage:
+##   docker compose -f docker-compose.prod.yml up -d
+##
+## Expects secrets injected via environment or Docker Secrets, not .env files.
+## All services sit behind Caddy for automatic TLS.
+##
+
+services:
+  # ─── Caddy reverse proxy ────────────────────────────────────────────
+  caddy:
+    image: caddy:2-alpine
+    container_name: re-caddy
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      re-api:
+        condition: service_healthy
+      re-webhooks:
+        condition: service_healthy
+      re-dashboard:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+          cpus: "0.25"
+
+  # ─── API Gateway ────────────────────────────────────────────────────
+  re-api:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    image: revenueedge/re-api:${TAG:-latest}
+    container_name: re-api
+    environment:
+      - SERVICE_NAME=re-api
+      - PORT=8080
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_SERVICE_KEY=${SUPABASE_SERVICE_KEY}
+      - SUPABASE_JWT_SECRET=${SUPABASE_JWT_SECRET}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - SENTRY_DSN=${SENTRY_DSN:-}
+      - ENVIRONMENT=production
+      - LOG_LEVEL=info
+      - SENDGRID_API_KEY=${SENDGRID_API_KEY:-}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
+    expose:
+      - "8080"
+    restart: always
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: "1.0"
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # ─── Webhook Receiver ───────────────────────────────────────────────
+  re-webhooks:
+    build:
+      context: ./apps/webhooks
+      dockerfile: Dockerfile
+    image: revenueedge/re-webhooks:${TAG:-latest}
+    container_name: re-webhooks
+    environment:
+      - SERVICE_NAME=re-webhooks
+      - PORT=8081
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_SERVICE_KEY=${SUPABASE_SERVICE_KEY}
+      - RETELL_API_KEY=${RETELL_API_KEY:-}
+      - INTERNAL_SERVICE_KEY=${INTERNAL_SERVICE_KEY}
+      - ENVIRONMENT=production
+      - LOG_LEVEL=info
+    expose:
+      - "8081"
+    depends_on:
+      re-api:
+        condition: service_healthy
+    restart: always
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8081/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+          cpus: "0.5"
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # ─── Queue Workers ──────────────────────────────────────────────────
+  re-workers:
+    build:
+      context: ./apps/workers
+      dockerfile: Dockerfile
+    image: revenueedge/re-workers:${TAG:-latest}
+    container_name: re-workers
+    environment:
+      - SERVICE_NAME=re-workers
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_SERVICE_KEY=${SUPABASE_SERVICE_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - RETELL_FROM_NUMBER=${RETELL_FROM_NUMBER:-}
+      - RETELL_API_KEY=${RETELL_API_KEY:-}
+      - TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID:-}
+      - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN:-}
+      - TWILIO_FROM_NUMBER=${TWILIO_FROM_NUMBER:-}
+      - SENDGRID_API_KEY=${SENDGRID_API_KEY:-}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
+      - SENTRY_DSN=${SENTRY_DSN:-}
+      - ENVIRONMENT=production
+      - LOG_LEVEL=info
+      - WORKERS=inbound_normalizer,conversation_intelligence,outbound_action,handoff,followup_scheduler,knowledge_ingestion,quote_drafting,booking
+    depends_on:
+      re-api:
+        condition: service_healthy
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: "1.0"
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # ─── Dashboard ──────────────────────────────────────────────────────
+  re-dashboard:
+    build:
+      context: ./apps/dashboard
+      dockerfile: Dockerfile
+      args:
+        - NEXT_PUBLIC_SUPABASE_URL=${SUPABASE_URL}
+        - NEXT_PUBLIC_SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
+        - NEXT_PUBLIC_API_URL=${PUBLIC_API_URL:-https://api.revenueedge.ai}
+    image: revenueedge/re-dashboard:${TAG:-latest}
+    container_name: re-dashboard
+    environment:
+      - PORT=3000
+    expose:
+      - "3000"
+    restart: always
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "--quiet", "http://localhost:3000"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: "1.0"
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+volumes:
+  caddy_data:
+  caddy_config:

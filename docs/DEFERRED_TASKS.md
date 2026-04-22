@@ -8,11 +8,9 @@ implementation cost estimate, and when to revisit.
 
 ## Phase 2 — After-Hours + FAQ
 
-### D-2.1 Smoke test: `scripts/smoke_phase2.sh`
-- **Why deferred**: Requires running services against a live Supabase instance; better as a dedicated integration-test sprint.
-- **Effort**: 1–2 hours
-- **When**: Before first real business onboarding.
-- **Spec**: See `PHASE_2_CHECKLIST.md` §13 for the 10-step scenario.
+### D-2.1 Smoke test: `scripts/smoke_phase2.sh` — COMPLETE
+- **Completed**: Script seeds business with hours/knowledge, simulates after-hours +
+  unanswerable SMS, asserts reply + classification + knowledge_gap task.
 
 ### D-2.2 Knowledge sources CRUD
 - **Why deferred**: Manual knowledge entry is sufficient for MVP; scraping/parsing adds complexity.
@@ -34,11 +32,10 @@ implementation cost estimate, and when to revisit.
   - `conversation_intelligence` detects attachments → sets `fields_collected.photos`
   - Consider Supabase Storage for self-hosted upload fallback
 
-### D-3.2 Seed default services
-- **Why deferred**: Business-specific; easier via API or a per-vertical seed script.
-- **Effort**: 1 hour
-- **When**: During onboarding for each new business.
-- **Approach**: Extend `scripts/seed_business.py` with a `--services` flag, or add vertical-specific presets (plumbing, HVAC, electrical, etc.) to `seed_mvp_defaults.sql`.
+### D-3.2 Seed default services — COMPLETE
+- **Completed**: Added `--services <vertical>` flag to `scripts/seed_business.py`.
+  Supports plumbing, hvac, electrical, landscaping, cleaning, dental, general.
+  Each vertical has 3–4 service presets with intake fields and price ranges.
 
 ### D-3.3 `WorkerSettings.auto_quote_max`
 - **Why deferred**: No limit needed for MVP; all quotes go to human review anyway.
@@ -53,23 +50,18 @@ implementation cost estimate, and when to revisit.
   - `estimate_turnaround_seconds`: average time from `lead.created` event to `quote.sent` event per business per day.
   - `quote_recovery_wins`: count leads that moved `quoted → won` after a `quote_followup_*` outbound message.
 
-### D-3.5 Smoke test: `scripts/smoke_phase3.sh`
-- **Why deferred**: Same reasoning as D-2.1.
-- **Effort**: 2 hours
-- **Spec**: See `PHASE_3_CHECKLIST.md` §10 for the 10-step scenario.
+### D-3.5 Smoke test: `scripts/smoke_phase3.sh` — COMPLETE
+- **Completed**: Script seeds service, simulates quote request + field replies, asserts
+  quote draft + approval + send + follow-up scheduling.
 
 ---
 
 ## Phase 4 — Booking or Callback
 
-### D-4.1 Fuzzy time resolution
-- **Why deferred**: The `booking_worker._resolve_preferred_time` currently only handles ISO datetime strings. Fuzzy inputs like "Thursday morning" or "next week" require NLP or LLM parsing.
-- **Effort**: 3–4 hours
-- **When**: After the first booking flows are tested with explicit times.
-- **Implementation**:
-  - Add a small LLM call in `booking_worker` to parse fuzzy times against the business's timezone
-  - Or use `dateparser` library for common patterns
-  - Map "morning" → 09:00, "afternoon" → 13:00, "evening" → 17:00 as heuristics
+### D-4.1 Fuzzy time resolution — COMPLETE
+- **Completed**: `_resolve_preferred_time` in `booking_worker.py` now handles day names
+  (Monday–Sunday), relative terms (today, tomorrow, next week), and time-of-day
+  (morning→09, afternoon→13, evening→17, etc.) resolved against the business timezone.
 
 ### D-4.2 Multi-turn slot offering
 - **Why deferred**: The slot-offering SMS is generated; customer reply parsing relies on the existing `conversation_intelligence` re-classification loop.
@@ -92,80 +84,60 @@ implementation cost estimate, and when to revisit.
 - **Effort**: 1–2 hours
 - **When**: After booking flow is live.
 
-### D-4.6 Smoke test: `scripts/smoke_phase4.sh`
-- **Effort**: 2 hours
-- **Spec**: See `PHASE_4_CHECKLIST.md` §9.
+### D-4.6 Smoke test: `scripts/smoke_phase4.sh` — COMPLETE
+- **Completed**: Script simulates booking request, asserts either booking created
+  or callback fallback (when no GCal connected) + customer notification.
 
 ---
 
 ## Phase 5 — Reactivation + ROI
 
-### D-5.1 `avg_response_seconds` computation
-- **Why deferred**: Requires per-conversation join between inbound and outbound messages, which is expensive at scale.
-- **Effort**: 2–3 hours
-- **When**: After 100+ conversations, when response-time benchmarking becomes meaningful.
-- **Implementation**:
-  - For each conversation with messages on the metric date:
-    - Find earliest inbound message `created_at`
-    - Find earliest outbound message `created_at` after it
-    - Compute delta in seconds
-  - Store the median across all conversations as `avg_response_seconds`
+### D-5.1 `avg_response_seconds` computation — COMPLETE
+- **Completed**: `_avg_response_seconds` in `metrics_rollup.py` computes median
+  inbound-to-outbound response time per conversation. Stored in
+  `metric_snapshots.payload.avg_response_seconds`. Payload version bumped to 3.
 
 ### D-5.2 Enhanced reactivation metrics
 - **Metrics**: `reactivation_sent`, `reactivation_replies`, `reactivation_conversions` in `metric_snapshots.payload`.
 - **Effort**: 1–2 hours
 - **When**: After first reactivation batch.
 
-### D-5.3 Daily summary scheduler integration
-- **Why deferred**: The `daily_summary.py` service is complete but not wired into the scheduler. It needs a second scheduled task that runs at end-of-business for each timezone.
-- **Effort**: 1 hour
-- **When**: Immediately after Phase 5 launch.
-- **Implementation**: In `apps/api/app/services/scheduler.py`, add a task that:
-  - Runs every hour
-  - Checks which businesses have `settings.daily_summary_enabled = true`
-  - For each, checks if current UTC time matches their configured EOD hour (default 18:00 local)
-  - Calls `send_daily_summary(business_id, date.today())`
+### D-5.3 Daily summary scheduler integration — COMPLETE
+- **Completed**: Wired `_summary_loop` into `apps/api/app/services/scheduler.py`.
+  Checks hourly, sends once per day after 22:00 UTC via `run_daily_summaries()`.
 
-### D-5.4 Smoke test: `scripts/smoke_phase5.sh`
-- **Effort**: 2–3 hours
-- **Spec**: See `PHASE_5_CHECKLIST.md` §7.
+### D-5.4 Smoke test: `scripts/smoke_phase5.sh` — COMPLETE
+- **Completed**: Script seeds stale leads, calls reactivation preview/launch,
+  tests metrics comparison + rollup endpoints.
 
 ---
 
 ## Cross-Phase Infrastructure
 
-### D-X.1 Dashboard UI (Next.js)
-- **Status**: API endpoints are complete for all 5 phases. No frontend code exists yet.
-- **Spec**: See `docs/DASHBOARD_SPEC.md` for full page-by-page specification.
-- **Effort**: 40–60 hours for a full dashboard
-- **When**: After backend is stabilized with real traffic.
-- **Stack**: Next.js 15 + Supabase Auth + Tailwind CSS + shadcn/ui
-- **Port source**: `SMB-MetaPattern/apps/dashboard/` for auth shell and layout patterns.
+### D-X.1 Dashboard UI (Next.js) — COMPLETE
+- **Completed**: Full Next.js 16 dashboard with 12 pages (dashboard home, inbox,
+  leads, quotes, bookings, knowledge, reactivation, 4 settings pages), Supabase
+  SSR auth (login/signup), sidebar nav, StatusBadge component, Recharts charts.
+  Build passes cleanly. Committed as `272fa1a`.
 
-### D-X.2 End-to-end integration tests
-- **Status**: All smoke test scripts are specified but not implemented.
-- **Effort**: 8–12 hours for all phases
-- **When**: Before first production deployment.
-- **Approach**: Python scripts that use `httpx` to hit the API, seed data, simulate webhooks, and assert database state via Supabase client.
+### D-X.2 End-to-end integration tests — MOSTLY COMPLETE
+- **Status**: Smoke test scripts implemented for all phases (0–5). Each script
+  seeds data, simulates webhooks, and asserts database state via Supabase client.
+  Full `httpx`-based integration test suite remains optional enhancement.
+- **Remaining**: True E2E tests that start all services in Docker.
 
-### D-X.3 Docker Compose production config
-- **Status**: `docker-compose.yml` defines dev services. Production needs:
-  - Health check readiness probes
-  - Resource limits
-  - Secret injection (not env files)
-  - Log driver configuration
-  - Caddy reverse proxy for TLS
-- **Effort**: 4–6 hours
-- **When**: Before first deployment to a real server.
+### D-X.3 Docker Compose production config — COMPLETE
+- **Completed**: `docker-compose.prod.yml` with Caddy TLS proxy, health checks,
+  resource limits, JSON log drivers, env-based secret injection, and standalone
+  dashboard Dockerfile. Caddyfile at `infra/caddy/Caddyfile`.
 
-### D-X.4 CI/CD pipeline
-- **Status**: Not started.
-- **Effort**: 4 hours
-- **Implementation**: GitHub Actions with:
-  - `py_compile` syntax check on all Python files
-  - `pytest` unit tests (when written)
-  - Docker build validation
-  - Auto-deploy to staging on push to `main`
+### D-X.4 CI/CD pipeline — COMPLETE
+- **Completed**: `.github/workflows/ci.yml` with:
+  - Python syntax + import check for api/webhooks/workers
+  - Dashboard TypeScript check + Next.js build
+  - Docker build validation for all services
+  - ShellCheck for smoke scripts
+  - Concurrency groups to cancel stale runs
 
 ---
 
@@ -192,13 +164,20 @@ These items have their own detailed documents and are not repeated here:
 
 | Priority | Item | Trigger | Effort |
 |---|---|---|---|
-| 1 | D-5.3 Daily summary scheduler | Phase 5 launch | 1h |
-| 2 | D-X.2 Smoke tests (all phases) | Before production | 8–12h |
-| 3 | D-X.1 Dashboard UI | After backend stable | 40–60h |
-| 4 | D-4.1 Fuzzy time resolution | After first bookings | 3–4h |
-| 5 | D-3.1 Photo request (MMS) | Service business requests | 4–8h |
-| 6 | D-5.1 avg_response_seconds | After 100+ conversations | 2–3h |
-| 7 | D-X.3 Production Docker config | Before deployment | 4–6h |
-| 8 | D-X.4 CI/CD pipeline | Before deployment | 4h |
-| 9 | D-3.4 Extended quote metrics | After 50+ quotes | 2h |
-| 10 | D-3.2 Seed default services | Per-business onboarding | 1h |
+| ~~1~~ | ~~D-5.3 Daily summary scheduler~~ | | **DONE** |
+| ~~2~~ | ~~D-X.1 Dashboard UI~~ | | **DONE** |
+| ~~3~~ | ~~D-X.2 Smoke tests~~ | | **DONE** |
+| ~~4~~ | ~~D-4.1 Fuzzy time resolution~~ | | **DONE** |
+| ~~5~~ | ~~D-5.1 avg_response_seconds~~ | | **DONE** |
+| ~~6~~ | ~~D-X.3 Production Docker config~~ | | **DONE** |
+| ~~7~~ | ~~D-X.4 CI/CD pipeline~~ | | **DONE** |
+| ~~8~~ | ~~D-3.2 Seed default services~~ | | **DONE** |
+| 1 | D-3.1 Photo request (MMS) | Service business requests | 4–8h |
+| 2 | D-4.2 Multi-turn slot offering | After basic booking tested | 2h |
+| 3 | D-4.3 GCal event updates on reschedule | After GCal integration tested | 2h |
+| 4 | D-3.3 auto_quote_max threshold | When auto-send needed | 30m |
+| 5 | D-3.4 Extended quote metrics | After 50+ quotes | 2h |
+| 6 | D-4.4 No-show grace per service | When false positives reported | 30m |
+| 7 | D-4.5 Phase 4 metrics additions | After booking flow live | 1–2h |
+| 8 | D-5.2 Enhanced reactivation metrics | After first reactivation batch | 1–2h |
+| 9 | D-2.2 Knowledge sources CRUD | When >50 knowledge items | 4–6h |

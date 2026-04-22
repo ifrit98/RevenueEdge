@@ -1,0 +1,30 @@
+{
+	email {$ACME_EMAIL:admin@revenueedge.ai}
+}
+
+{$DOMAIN:revenueedge.localhost} {
+	handle /webhooks/* {
+		reverse_proxy re-webhooks:8081
+	}
+
+	handle /v1/* {
+		reverse_proxy re-api:8080
+	}
+
+	handle /health {
+		reverse_proxy re-api:8080
+	}
+
+	handle /internal/* {
+		respond "Forbidden" 403
+	}
+
+	handle {
+		reverse_proxy re-dashboard:3000
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}
