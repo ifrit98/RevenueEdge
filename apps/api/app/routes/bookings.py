@@ -153,13 +153,23 @@ async def cancel_booking(
 
     event_id = booking.get("external_calendar_event_id")
     if event_id:
-        try:
-            from ...workers_lib_stub import cancel_calendar_event  # type: ignore
-        except ImportError:
-            logger.info(
-                "Calendar cancel deferred — event %s will be cleaned up by worker",
-                event_id,
+        await async_execute(
+            client.rpc(
+                "enqueue_job",
+                {
+                    "p_queue_name": "booking-sync",
+                    "p_payload": {
+                        "action": "cancel",
+                        "booking_id": booking_id,
+                        "business_id": user["business_id"],
+                        "external_calendar_event_id": event_id,
+                    },
+                    "p_business_id": user["business_id"],
+                    "p_idempotency_key": f"bksync:cancel:{booking_id}",
+                    "p_priority": 15,
+                },
             )
+        )
 
     await async_execute(
         client.rpc(
@@ -246,6 +256,29 @@ async def reschedule_booking(
     rows = res.data or []
     if not rows:
         raise HTTPException(status_code=404, detail="Booking not found")
+
+    booking = rows[0]
+    event_id = booking.get("external_calendar_event_id")
+    if event_id:
+        await async_execute(
+            client.rpc(
+                "enqueue_job",
+                {
+                    "p_queue_name": "booking-sync",
+                    "p_payload": {
+                        "action": "reschedule",
+                        "booking_id": booking_id,
+                        "business_id": user["business_id"],
+                        "external_calendar_event_id": event_id,
+                        "new_start": body.new_start,
+                        "new_end": body.new_end,
+                    },
+                    "p_business_id": user["business_id"],
+                    "p_idempotency_key": f"bksync:resched:{booking_id}:{now}",
+                    "p_priority": 15,
+                },
+            )
+        )
 
     await async_execute(
         client.rpc(

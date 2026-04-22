@@ -352,10 +352,10 @@ class ConversationIntelligenceWorker(BaseWorker):
             )
             downstream.append("quote-drafting")
 
-        elif next_action == "book":
+        elif next_action in {"book", "confirm_booking"}:
             service_id = decision.get("service_id") or (lead or {}).get("service_id")
             preferred_time = decision.get("preferred_time")
-            booking_confirmed = decision.get("booking_confirmed", False)
+            booking_confirmed = next_action == "confirm_booking" or decision.get("booking_confirmed", False)
             biz_settings = (business or {}).get("settings") or {}
             if biz_settings.get("booking_automation_enabled"):
                 await rpc(

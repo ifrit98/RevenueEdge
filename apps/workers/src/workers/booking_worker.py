@@ -31,9 +31,11 @@ from ..lib.channels import fetch_business
 from ..lib.google_calendar import (
     CalendarNotConnectedError,
     CalendarTokenError,
+    cancel_event,
     compute_free_slots,
     create_event,
     get_availability,
+    update_event,
 )
 from ..lib.leads import advance_lead_stage
 from ..supabase_client import async_execute, get_client, rpc
@@ -49,17 +51,24 @@ class BookingWorker(BaseWorker):
 
     async def handle(self, job: Job) -> Optional[dict]:
         payload = job.payload or {}
+        action = payload.get("action")
+        business_id = job.business_id or payload.get("business_id")
+
+        if not business_id:
+            raise PermanentError("business_id required")
+
+        if action == "cancel":
+            return await self._handle_cancel(job)
+        if action == "reschedule":
+            return await self._handle_reschedule(job)
+
         lead_id = payload.get("lead_id")
         conversation_id = payload.get("conversation_id")
-        business_id = job.business_id or payload.get("business_id")
         contact_id = payload.get("contact_id")
         service_id = payload.get("service_id")
         preferred_time = payload.get("preferred_time")
         confirmed = payload.get("confirmed", False)
         trace_id = payload.get("trace_id")
-
-        if not business_id:
-            raise PermanentError("business_id required")
 
         client = get_client()
         business = await fetch_business(business_id)
@@ -327,7 +336,11 @@ class BookingWorker(BaseWorker):
                 },
             )
 
-            no_show_at = (slot_end + timedelta(hours=1)).isoformat()
+            grace_minutes = 60
+            if service:
+                svc_meta = (service.get("metadata") or {})
+                grace_minutes = int(svc_meta.get("no_show_grace_minutes", 60))
+            no_show_at = (slot_end + timedelta(minutes=grace_minutes)).isoformat()
             await rpc(
                 "enqueue_job",
                 {
@@ -372,6 +385,57 @@ class BookingWorker(BaseWorker):
             "status": booking_status,
             "calendar_event_id": event_id,
         }
+
+    async def _handle_cancel(self, job: Job) -> dict:
+        payload = job.payload or {}
+        business_id = job.business_id or payload["business_id"]
+        event_id = payload.get("external_calendar_event_id")
+        client_id = os.getenv("GOOGLE_CLIENT_ID", "")
+        client_secret = os.getenv("GOOGLE_CLIENT_SECRET", "")
+
+        if event_id:
+            try:
+                await cancel_event(
+                    business_id=business_id,
+                    event_id=event_id,
+                    client_id=client_id,
+                    client_secret=client_secret,
+                )
+                logger.info("Cancelled calendar event %s", event_id)
+            except Exception as exc:
+                logger.warning("Calendar cancel failed (non-fatal): %s", exc)
+
+        return {"action": "calendar_cancel", "event_id": event_id}
+
+    async def _handle_reschedule(self, job: Job) -> dict:
+        payload = job.payload or {}
+        business_id = job.business_id or payload["business_id"]
+        event_id = payload.get("external_calendar_event_id")
+        new_start = payload.get("new_start")
+        new_end = payload.get("new_end")
+        client_id = os.getenv("GOOGLE_CLIENT_ID", "")
+        client_secret = os.getenv("GOOGLE_CLIENT_SECRET", "")
+
+        if not event_id or not new_start:
+            return {"action": "reschedule_skipped", "reason": "missing event_id or new_start"}
+
+        start_dt = datetime.fromisoformat(new_start)
+        end_dt = datetime.fromisoformat(new_end) if new_end else start_dt + timedelta(minutes=_DEFAULT_SLOT_MINUTES)
+
+        try:
+            await update_event(
+                business_id=business_id,
+                event_id=event_id,
+                start=start_dt,
+                end=end_dt,
+                client_id=client_id,
+                client_secret=client_secret,
+            )
+            logger.info("Rescheduled calendar event %s to %s", event_id, new_start)
+        except Exception as exc:
+            logger.warning("Calendar reschedule failed (non-fatal): %s", exc)
+
+        return {"action": "calendar_reschedule", "event_id": event_id, "new_start": new_start}
 
     _TIME_OF_DAY = {
         "morning": 9,

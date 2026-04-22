@@ -98,29 +98,61 @@ class QuoteDraftingWorker(BaseWorker):
                 "service_name": (service or {}).get("name"),
             },
         }
+        biz_settings = (business or {}).get("settings") or {}
+        auto_max = biz_settings.get("auto_quote_max")
+        auto_send = (
+            auto_max is not None
+            and amount_high is not None
+            and float(amount_high) <= float(auto_max)
+        )
+
+        quote_row["status"] = "approved" if auto_send else "awaiting_review"
         res = await async_execute(client.table("quotes").insert(quote_row))
         rows = getattr(res, "data", None) or []
         if not rows:
             raise PermanentError("Failed to insert quote row")
         quote = rows[0]
 
-        await async_execute(
-            client.table("tasks").insert({
-                "business_id": business_id,
-                "conversation_id": conversation_id,
-                "task_type": "quote_review",
-                "title": f"Review quote for {(service or {}).get('name', 'service')}",
-                "priority": "high",
-                "status": "open",
-                "metadata": {
-                    "quote_id": quote["id"],
-                    "lead_id": lead_id,
-                    "service_name": (service or {}).get("name"),
-                    "amount_range": f"${amount_low or '?'}–${amount_high or '?'}",
-                    "trace_id": trace_id,
+        if auto_send:
+            await rpc(
+                "enqueue_job",
+                {
+                    "p_queue_name": "outbound-actions",
+                    "p_payload": {
+                        "action": "send_quote",
+                        "quote_id": quote["id"],
+                        "conversation_id": conversation_id,
+                        "business_id": business_id,
+                        "contact_id": lead.get("contact_id"),
+                        "trace_id": trace_id,
+                    },
+                    "p_business_id": business_id,
+                    "p_idempotency_key": f"ob:autoquote:{job.id}",
+                    "p_priority": 15,
                 },
-            })
-        )
+            )
+            logger.info(
+                "Auto-sending quote %s (amount_high=%s <= auto_max=%s)",
+                quote["id"], amount_high, auto_max,
+            )
+        else:
+            await async_execute(
+                client.table("tasks").insert({
+                    "business_id": business_id,
+                    "conversation_id": conversation_id,
+                    "task_type": "quote_review",
+                    "title": f"Review quote for {(service or {}).get('name', 'service')}",
+                    "priority": "high",
+                    "status": "open",
+                    "metadata": {
+                        "quote_id": quote["id"],
+                        "lead_id": lead_id,
+                        "service_name": (service or {}).get("name"),
+                        "amount_range": f"${amount_low or '?'}–${amount_high or '?'}",
+                        "trace_id": trace_id,
+                    },
+                })
+            )
 
         await advance_lead_stage(
             lead_id=lead_id,
@@ -139,6 +171,7 @@ class QuoteDraftingWorker(BaseWorker):
                     "service_id": service_id,
                     "amount_low": amount_low,
                     "amount_high": amount_high,
+                    "auto_sent": auto_send,
                     "trace_id": trace_id,
                 },
                 "p_business_id": business_id,
@@ -150,7 +183,8 @@ class QuoteDraftingWorker(BaseWorker):
 
         return {
             "quote_id": quote["id"],
-            "status": "awaiting_review",
+            "status": "approved" if auto_send else "awaiting_review",
+            "auto_sent": auto_send,
             "service": (service or {}).get("name"),
             "amount_low": amount_low,
             "amount_high": amount_high,

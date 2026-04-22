@@ -46,6 +46,7 @@ NEXT_ACTIONS = [
     "collect_quote_details",
     "draft_quote",
     "book",
+    "confirm_booking",
     "schedule_callback",
     "handoff",
     "mark_resolved",
@@ -88,6 +89,14 @@ When the intent is quote_request or booking_request:
 4. When all required fields are collected, set recommended_next_action = "draft_quote".
 5. If the customer provides unsolicited fields, capture them in fields_collected anyway.
 6. Include each extracted field in "fields_collected" keyed by the field name (e.g. "name", "address", "scope").
+
+## Slot Selection (booking flow)
+When the previous outbound message offered numbered time slots (e.g. "1. Thursday at 9AM, 2. Friday at 2PM"):
+- If the customer replies selecting a slot (e.g. "option 2", "the second one", "Friday works"):
+  - Set recommended_next_action = "confirm_booking"
+  - Set booking_confirmed = true
+  - Set preferred_time to the ISO datetime of the selected slot (resolve from context)
+- If the customer proposes a different time, set recommended_next_action = "book" with the new preferred_time.
 """.replace(
     "INTENT_VALUES", ", ".join(f'"{v}"' for v in INTENT_VALUES)
 ).replace("URGENCY_VALUES", ", ".join(f'"{v}"' for v in URGENCY_VALUES)).replace(

@@ -235,6 +235,177 @@ async def _avg_response_seconds(*, business_id: str, start: str, end: str) -> Op
     return deltas[mid]
 
 
+async def _estimate_turnaround_seconds(*, business_id: str, start: str, end: str) -> Optional[float]:
+    """Median seconds between lead creation and first quote sent for that lead."""
+    client = get_supabase_client()
+    if client is None:
+        return None
+    quotes_res = await async_execute(
+        client.table("quotes")
+        .select("lead_id, sent_at")
+        .eq("business_id", business_id)
+        .gte("sent_at", start)
+        .lt("sent_at", end)
+        .order("sent_at", desc=False)
+    )
+    lead_first_sent: dict[str, str] = {}
+    for q in quotes_res.data or []:
+        lid = q.get("lead_id")
+        if lid and lid not in lead_first_sent and q.get("sent_at"):
+            lead_first_sent[lid] = q["sent_at"]
+    if not lead_first_sent:
+        return None
+
+    leads_res = await async_execute(
+        client.table("leads")
+        .select("id, created_at")
+        .in_("id", list(lead_first_sent.keys()))
+    )
+    lead_created: dict[str, str] = {}
+    for row in leads_res.data or []:
+        if row.get("created_at"):
+            lead_created[row["id"]] = row["created_at"]
+
+    from datetime import datetime as _dt
+    deltas: list[float] = []
+    for lid, sent_ts in lead_first_sent.items():
+        created_ts = lead_created.get(lid)
+        if not created_ts:
+            continue
+        t_c = _dt.fromisoformat(created_ts.replace("Z", "+00:00"))
+        t_s = _dt.fromisoformat(sent_ts.replace("Z", "+00:00"))
+        diff = (t_s - t_c).total_seconds()
+        if diff >= 0:
+            deltas.append(diff)
+    if not deltas:
+        return None
+    deltas.sort()
+    mid = len(deltas) // 2
+    return (deltas[mid - 1] + deltas[mid]) / 2 if len(deltas) % 2 == 0 else deltas[mid]
+
+
+async def _count_quote_recovery_wins(*, business_id: str, start: str, end: str) -> int:
+    """Leads that moved to 'won' on the metric date and had a quote_followup outbound event."""
+    client = get_supabase_client()
+    if client is None:
+        return 0
+    won_res = await async_execute(
+        client.table("leads")
+        .select("id")
+        .eq("business_id", business_id)
+        .eq("stage", "won")
+        .gte("updated_at", start)
+        .lt("updated_at", end)
+    )
+    lead_ids = [r["id"] for r in (won_res.data or [])]
+    if not lead_ids:
+        return 0
+    count = 0
+    for lid in lead_ids:
+        ev_res = await async_execute(
+            client.table("events")
+            .select("id", count="exact")
+            .eq("business_id", business_id)
+            .eq("aggregate_type", "lead")
+            .eq("aggregate_id", lid)
+            .like("event_type", "quote.followup%")
+            .limit(1)
+        )
+        if int(getattr(ev_res, "count", None) or len(ev_res.data or [])) > 0:
+            count += 1
+    return count
+
+
+async def _count_bookings_by_status(*, business_id: str, status: str, start: str, end: str) -> int:
+    client = get_supabase_client()
+    if client is None:
+        return 0
+    res = await async_execute(
+        client.table("bookings")
+        .select("id", count="exact")
+        .eq("business_id", business_id)
+        .eq("status", status)
+        .gte("updated_at", start)
+        .lt("updated_at", end)
+    )
+    return int(getattr(res, "count", None) or len(res.data or []))
+
+
+async def _count_reactivation_replies(*, business_id: str, start: str, end: str) -> int:
+    """Conversations that received an inbound message after a reactivation outbound."""
+    client = get_supabase_client()
+    if client is None:
+        return 0
+    react_evts = await async_execute(
+        client.table("events")
+        .select("payload")
+        .eq("business_id", business_id)
+        .eq("event_type", "reactivation.sent")
+        .gte("occurred_at", start)
+        .lt("occurred_at", end)
+    )
+    conv_ids: set[str] = set()
+    for evt in react_evts.data or []:
+        p = evt.get("payload") or {}
+        cid = p.get("conversation_id")
+        if cid:
+            conv_ids.add(cid)
+    if not conv_ids:
+        return 0
+    count = 0
+    for cid in conv_ids:
+        msg_res = await async_execute(
+            client.table("messages")
+            .select("id", count="exact")
+            .eq("conversation_id", cid)
+            .eq("direction", "inbound")
+            .gte("created_at", start)
+            .lt("created_at", end)
+            .limit(1)
+        )
+        if int(getattr(msg_res, "count", None) or len(msg_res.data or [])) > 0:
+            count += 1
+    return count
+
+
+async def _count_reactivation_conversions(*, business_id: str, start: str, end: str) -> int:
+    """Leads that advanced from 'new' after a reactivation event on the metric date."""
+    client = get_supabase_client()
+    if client is None:
+        return 0
+    react_evts = await async_execute(
+        client.table("events")
+        .select("payload")
+        .eq("business_id", business_id)
+        .eq("event_type", "reactivation.sent")
+        .gte("occurred_at", start)
+        .lt("occurred_at", end)
+    )
+    contact_ids: set[str] = set()
+    for evt in react_evts.data or []:
+        p = evt.get("payload") or {}
+        cid = p.get("contact_id")
+        if cid:
+            contact_ids.add(cid)
+    if not contact_ids:
+        return 0
+    count = 0
+    for cid in contact_ids:
+        lead_res = await async_execute(
+            client.table("leads")
+            .select("id", count="exact")
+            .eq("business_id", business_id)
+            .eq("contact_id", cid)
+            .in_("stage", ["contacted", "qualified", "quoted", "booked", "won"])
+            .gte("updated_at", start)
+            .lt("updated_at", end)
+            .limit(1)
+        )
+        if int(getattr(lead_res, "count", None) or len(lead_res.data or [])) > 0:
+            count += 1
+    return count
+
+
 async def _rollup_for_business(business_id: str, metric_date: date) -> bool:
     client = get_supabase_client()
     if client is None:
@@ -289,6 +460,33 @@ async def _rollup_for_business(business_id: str, metric_date: date) -> bool:
         business_id=business_id, start=start, end=end
     )
 
+    est_turnaround = await _estimate_turnaround_seconds(
+        business_id=business_id, start=start, end=end
+    )
+    quote_recovery_wins = await _count_quote_recovery_wins(
+        business_id=business_id, start=start, end=end
+    )
+
+    booking_requests = await _count_events(
+        business_id=business_id, event_type="booking.requested", start=start, end=end
+    )
+    callbacks_created = await _count_tasks_by_type(
+        business_id=business_id, task_type="callback", start=start, end=end
+    )
+    no_shows = await _count_bookings_by_status(
+        business_id=business_id, status="no_show", start=start, end=end
+    )
+
+    reactivation_sent = await _count_events(
+        business_id=business_id, event_type="reactivation.sent", start=start, end=end
+    )
+    reactivation_replies = await _count_reactivation_replies(
+        business_id=business_id, start=start, end=end
+    )
+    reactivation_conversions = await _count_reactivation_conversions(
+        business_id=business_id, start=start, end=end
+    )
+
     row = {
         "business_id": business_id,
         "metric_date": metric_date.isoformat(),
@@ -301,10 +499,18 @@ async def _rollup_for_business(business_id: str, metric_date: date) -> bool:
         "wins": wins,
         "attributed_revenue": attributed_revenue,
         "payload": {
-            "version": 3,
+            "version": 4,
             "knowledge_gaps": knowledge_gaps,
             "after_hours_leads": after_hours_leads,
             "avg_response_seconds": avg_resp,
+            "estimate_turnaround_seconds": est_turnaround,
+            "quote_recovery_wins": quote_recovery_wins,
+            "booking_requests": booking_requests,
+            "callbacks_created": callbacks_created,
+            "no_shows": no_shows,
+            "reactivation_sent": reactivation_sent,
+            "reactivation_replies": reactivation_replies,
+            "reactivation_conversions": reactivation_conversions,
         },
     }
 
