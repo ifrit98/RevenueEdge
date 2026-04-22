@@ -84,6 +84,9 @@ class FollowupSchedulerWorker(BaseWorker):
             "after_hours_review": self._after_hours_review,
             "no_reply_check": self._no_reply_check,
             "quote_recovery": self._quote_recovery,
+            "appointment_reminder": self._appointment_reminder,
+            "no_show_check": self._no_show_check,
+            "reactivation": self._reactivation,
         }.get(followup_type)
 
         if handler:
@@ -157,6 +160,186 @@ class FollowupSchedulerWorker(BaseWorker):
             "attempt": attempt + 1,
             "delay_hours": delay_hours,
         }
+
+    async def _appointment_reminder(
+        self, *, conversation_id: str, business_id: str,
+        attempt: int, max_attempts: int, trace_id: Optional[str], job_id: str,
+    ) -> dict:
+        """Send a 24h-before appointment reminder if booking is still confirmed."""
+        payload = self._current_payload or {}
+        booking_id = payload.get("booking_id")
+        contact_id = payload.get("contact_id")
+
+        if booking_id:
+            client = get_client()
+            res = await async_execute(
+                client.table("bookings")
+                .select("id, status, scheduled_start")
+                .eq("id", booking_id)
+                .limit(1)
+            )
+            rows = getattr(res, "data", None) or []
+            if rows:
+                booking = rows[0]
+                if booking.get("status") not in {"confirmed", "tentative"}:
+                    return {"action": "skipped", "reason": f"booking is {booking.get('status')}"}
+
+        await rpc(
+            "enqueue_job",
+            {
+                "p_queue_name": "outbound-actions",
+                "p_payload": {
+                    "action": "send_sms",
+                    "conversation_id": conversation_id,
+                    "business_id": business_id,
+                    "contact_id": contact_id,
+                    "template_name": "appointment_reminder",
+                    "intent": "appointment_reminder",
+                    "trace_id": trace_id,
+                    "reason": "appointment_reminder",
+                },
+                "p_business_id": business_id,
+                "p_idempotency_key": f"ob:remind:{booking_id or job_id}",
+                "p_priority": 15,
+            },
+        )
+
+        await rpc(
+            "enqueue_event",
+            {
+                "p_event_type": "followup.sent",
+                "p_payload": {
+                    "followup_type": "appointment_reminder",
+                    "booking_id": booking_id,
+                    "business_id": business_id,
+                    "trace_id": trace_id,
+                },
+                "p_business_id": business_id,
+                "p_aggregate_type": "booking",
+                "p_aggregate_id": booking_id or "",
+                "p_idempotency_key": f"fu:remind-sent:{job_id}",
+            },
+        )
+
+        return {"action": "reminder_sent", "booking_id": booking_id}
+
+    async def _no_show_check(
+        self, *, conversation_id: str, business_id: str,
+        attempt: int, max_attempts: int, trace_id: Optional[str], job_id: str,
+    ) -> dict:
+        """Check if a booking was completed. If not, mark as no_show."""
+        payload = self._current_payload or {}
+        booking_id = payload.get("booking_id")
+
+        if not booking_id:
+            return {"action": "skipped", "reason": "no_booking_id"}
+
+        client = get_client()
+        res = await async_execute(
+            client.table("bookings")
+            .select("id, status, lead_id")
+            .eq("id", booking_id)
+            .limit(1)
+        )
+        rows = getattr(res, "data", None) or []
+        if not rows:
+            return {"action": "skipped", "reason": "booking_not_found"}
+
+        booking = rows[0]
+        if booking["status"] in {"completed", "cancelled"}:
+            return {"action": "skipped", "reason": f"booking already {booking['status']}"}
+
+        await async_execute(
+            client.table("bookings")
+            .update({"status": "no_show", "updated_at": datetime.now(timezone.utc).isoformat()})
+            .eq("id", booking_id)
+        )
+
+        await async_execute(
+            client.table("tasks").insert({
+                "business_id": business_id,
+                "conversation_id": conversation_id,
+                "task_type": "no_show_followup",
+                "title": "No-show: customer didn't attend appointment",
+                "priority": "medium",
+                "status": "open",
+                "metadata": {"booking_id": booking_id, "lead_id": booking.get("lead_id"), "trace_id": trace_id},
+            })
+        )
+
+        await rpc(
+            "enqueue_event",
+            {
+                "p_event_type": "booking.no_show",
+                "p_payload": {"booking_id": booking_id, "business_id": business_id, "trace_id": trace_id},
+                "p_business_id": business_id,
+                "p_aggregate_type": "booking",
+                "p_aggregate_id": booking_id,
+                "p_idempotency_key": f"book:noshow:{booking_id}",
+            },
+        )
+
+        return {"action": "marked_no_show", "booking_id": booking_id}
+
+    async def _reactivation(
+        self, *, conversation_id: str, business_id: str,
+        attempt: int, max_attempts: int, trace_id: Optional[str], job_id: str,
+    ) -> dict:
+        """Send a reactivation message to a stale lead."""
+        payload = self._current_payload or {}
+        contact_id = payload.get("contact_id")
+        template_name = payload.get("template_name") or "reactivation"
+
+        if contact_id:
+            client = get_client()
+            res = await async_execute(
+                client.table("contacts")
+                .select("metadata")
+                .eq("id", contact_id)
+                .limit(1)
+            )
+            rows = getattr(res, "data", None) or []
+            if rows and (rows[0].get("metadata") or {}).get("sms_opt_out"):
+                return {"action": "skipped", "reason": "sms_opt_out"}
+
+        await rpc(
+            "enqueue_job",
+            {
+                "p_queue_name": "outbound-actions",
+                "p_payload": {
+                    "action": "send_sms",
+                    "conversation_id": conversation_id,
+                    "business_id": business_id,
+                    "contact_id": contact_id,
+                    "template_name": template_name,
+                    "intent": "reactivation",
+                    "trace_id": trace_id,
+                    "reason": "reactivation",
+                },
+                "p_business_id": business_id,
+                "p_idempotency_key": f"ob:react:{job_id}",
+                "p_priority": 40,
+            },
+        )
+
+        await rpc(
+            "enqueue_event",
+            {
+                "p_event_type": "reactivation.sent",
+                "p_payload": {
+                    "lead_id": payload.get("lead_id"),
+                    "contact_id": contact_id,
+                    "business_id": business_id,
+                    "trace_id": trace_id,
+                },
+                "p_business_id": business_id,
+                "p_aggregate_type": "lead",
+                "p_aggregate_id": payload.get("lead_id") or "",
+                "p_idempotency_key": f"react:sent:{job_id}",
+            },
+        )
+
+        return {"action": "reactivation_sent"}
 
     async def _quote_recovery(
         self, *, conversation_id: str, business_id: str,

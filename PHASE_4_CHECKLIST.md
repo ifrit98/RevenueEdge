@@ -26,17 +26,17 @@
 
 ### 1. Google Calendar OAuth
 
-- [ ] Port from `SMB-MetaPattern/apps/api-gateway/app/oauth_refresh.py`:
+- [x] Port from `SMB-MetaPattern/apps/api-gateway/app/oauth_refresh.py`:
   - OAuth 2.0 authorization code flow with PKCE
   - Token storage in `businesses.settings.google_calendar` (encrypted refresh token)
   - Auto-refresh on access-token expiry
   - Scopes: `https://www.googleapis.com/auth/calendar.events`, `https://www.googleapis.com/auth/calendar.readonly`
-- [ ] New API routes in `apps/api/app/routes/integrations.py`:
+- [x] New API routes in `apps/api/app/routes/integrations.py`:
   - `GET /v1/integrations/google-calendar/auth-url` — returns the OAuth redirect URL
   - `GET /v1/integrations/google-calendar/callback` — handles the OAuth callback, stores tokens
   - `GET /v1/integrations/google-calendar/status` — returns whether connected + which calendar is selected
   - `DELETE /v1/integrations/google-calendar` — disconnects (revokes token, clears from settings)
-- [ ] Store in `businesses.settings`:
+- [x] Store in `businesses.settings`:
   ```json
   {
     "google_calendar": {
@@ -49,7 +49,7 @@
     }
   }
   ```
-- [ ] `lib/google_calendar.py` in workers:
+- [x] `lib/google_calendar.py` in workers:
   - `get_availability(business_id, date_range)` → returns free/busy blocks
   - `create_event(business_id, summary, start, end, attendees, description)` → returns event ID
   - `update_event(business_id, event_id, updates)` → reschedule
@@ -58,8 +58,8 @@
 
 ### 2. Booking worker
 
-- [ ] New worker: `booking_worker.py`, consumes `booking-sync` queue
-- [ ] Register in `main.py` worker registry
+- [x] New worker: `booking_worker.py`, consumes `booking-sync` queue
+- [x] Register in `main.py` worker registry
 - [ ] Job payload:
   ```json
   {
@@ -72,7 +72,7 @@
     "trace_id": "..."
   }
   ```
-- [ ] Booking flow:
+- [x] Booking flow:
   1. **Verify booking is allowed** (all must pass):
      - `businesses.settings.booking_automation_enabled = true`
      - Service is in-scope (`service_id` maps to an active service)
@@ -100,7 +100,7 @@
 
 ### 3. Callback fallback
 
-- [ ] When booking fails any policy check or no availability:
+- [x] When booking fails any policy check or no availability:
   - Create `tasks` row: `type = 'callback'`, `priority` based on urgency, `source_table = 'leads'`, `source_id = lead.id`
   - Task description includes: customer name, phone, requested service, preferred time, urgency, conversation summary
   - Enqueue `outbound-actions` with `callback_scheduling` template: "Got it. What's the best number and a good time for the team to call you back?"
@@ -120,7 +120,7 @@
 
 ### 5. Appointment reminders
 
-- [ ] After `booking.created`:
+- [x] After `booking.created`:
   - `follow-up-scheduler` enqueues a reminder job with `available_at = scheduled_start - 24h`
   - `followup_type = 'appointment_reminder'`
 - [ ] Reminder logic:
@@ -139,7 +139,7 @@
 
 ### 7. Conversation intelligence — booking routing
 
-- [ ] When `recommended_next_action = 'book'`:
+- [x] When `recommended_next_action = 'book'`:
   - Check if `businesses.settings.booking_automation_enabled`
   - If yes → enqueue `booking-sync`
   - If no → treat as `schedule_callback` → enqueue `human-handoff` with `task_type = 'callback'`

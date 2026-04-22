@@ -108,6 +108,36 @@ async def _count_bookings(*, business_id: str, start: str, end: str) -> int:
     return int(getattr(res, "count", None) or len(res.data or []))
 
 
+async def _sum_attributed_revenue(*, business_id: str, start: str, end: str) -> float:
+    """Sum of quote amount_low for leads that moved to 'won' on the metric date."""
+    client = get_supabase_client()
+    if client is None:
+        return 0.0
+    res = await async_execute(
+        client.table("leads")
+        .select("id")
+        .eq("business_id", business_id)
+        .eq("stage", "won")
+        .gte("updated_at", start)
+        .lt("updated_at", end)
+    )
+    lead_ids = [r["id"] for r in (res.data or [])]
+    if not lead_ids:
+        return 0.0
+    total = 0.0
+    for lid in lead_ids:
+        q_res = await async_execute(
+            client.table("quotes")
+            .select("amount_low")
+            .eq("lead_id", lid)
+            .eq("status", "sent")
+            .limit(1)
+        )
+        for q in (q_res.data or []):
+            total += q.get("amount_low") or 0
+    return total
+
+
 async def _count_tasks_by_type(*, business_id: str, task_type: str, start: str, end: str) -> int:
     client = get_supabase_client()
     if client is None:
@@ -180,6 +210,7 @@ async def _rollup_for_business(business_id: str, metric_date: date) -> bool:
     quotes_sent = await _count_quotes_sent(business_id=business_id, start=start, end=end)
     bookings = await _count_bookings(business_id=business_id, start=start, end=end)
     recovered = await _count_recovered(business_id=business_id, start=start, end=end)
+    attributed_revenue = await _sum_attributed_revenue(business_id=business_id, start=start, end=end)
 
     knowledge_gaps = await _count_tasks_by_type(
         business_id=business_id, task_type="knowledge_gap", start=start, end=end
@@ -201,7 +232,7 @@ async def _rollup_for_business(business_id: str, metric_date: date) -> bool:
         "quotes_sent": quotes_sent,
         "bookings": bookings,
         "wins": wins,
-        "attributed_revenue": 0,
+        "attributed_revenue": attributed_revenue,
         "payload": {
             "version": 2,
             "knowledge_gaps": knowledge_gaps,

@@ -24,15 +24,18 @@ from .errors import AppError
 from .logging_config import setup_logging
 from .monitoring import capture_exception, init_sentry
 from .routes import (
+    bookings as bookings_routes,
     businesses as businesses_routes,
     channels as channels_routes,
     conversations as conversations_routes,
     health as health_routes,
+    integrations as integrations_routes,
     knowledge as knowledge_routes,
     leads as leads_routes,
     metrics as metrics_routes,
     queue as queue_routes,
     quotes as quotes_routes,
+    reactivation as reactivation_routes,
     services as services_routes,
     tasks as tasks_routes,
 )
@@ -71,12 +74,15 @@ app.add_middleware(
 
 app.include_router(health_routes.router)
 app.include_router(queue_routes.router)
+app.include_router(bookings_routes.router)
 app.include_router(businesses_routes.router)
 app.include_router(channels_routes.router)
 app.include_router(conversations_routes.router)
+app.include_router(integrations_routes.router)
 app.include_router(knowledge_routes.router)
 app.include_router(leads_routes.router)
 app.include_router(quotes_routes.router)
+app.include_router(reactivation_routes.router)
 app.include_router(services_routes.router)
 app.include_router(tasks_routes.router)
 app.include_router(metrics_routes.router)

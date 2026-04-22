@@ -45,6 +45,7 @@ NEXT_ACTIONS = [
     "ask_question",
     "collect_quote_details",
     "draft_quote",
+    "book",
     "schedule_callback",
     "handoff",
     "mark_resolved",
@@ -63,6 +64,8 @@ Return STRICT JSON with this shape (no prose):
   "reply_text": string (<=320 chars) OR empty,
   "fields_collected": { "field_name": "value" },
   "service_id": "uuid or null (matched service from ## Available Services)",
+  "preferred_time": "ISO datetime or fuzzy string like 'Thursday morning' (only for booking_request)",
+  "booking_confirmed": boolean (true if customer explicitly confirmed a specific offered slot),
   "knowledge_missing": boolean (true only if knowledge section provided but no article covers the question),
   "handoff_reason": string (only if next_action is "handoff"),
   "summary": short recap <=200 chars

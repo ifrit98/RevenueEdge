@@ -8,31 +8,13 @@ what the trigger condition is.
 
 ## 1. Per-Contact / Per-Business SMS Rate Limiting
 
-**Status**: Phase 2 deliverable (moved from Phase 1 backlog).
-**Trigger**: First real business onboarded.
+**Status**: ✅ COMPLETE (Phase 2).
 
-### Current state
-
-- `contacts.metadata.sms_opt_out` is checked in `outbound_action` (Phase 1)
-- No per-contact throttle exists yet
-
-### Implementation plan
-
-- Add `lib/rate_limit.py` in workers:
-  - Query `events` table: `SELECT count(*) FROM events WHERE event_type = 'outbound.sms.sent' AND payload->>'contact_id' = :cid AND occurred_at > now() - interval ':N seconds'`
-  - Default: 1 SMS per contact per 120 seconds
-  - Configurable via `businesses.settings.sms_rate_limit_seconds`
-- If limit hit: re-enqueue the outbound job with `available_at = now() + remaining_cooldown`
-- Per-business daily cap: `businesses.settings.daily_sms_cap` (default: 500)
-  - Query: count today's `outbound.sms.sent` events for the business
-  - If hit: create a `tasks.type = 'ops_review'` alerting the operator
-
-### Why not Redis
-
-For MVP volumes (< 100 SMS/day per business), querying `events` is fast enough.
-The events table has an index on `(business_id, event_type, occurred_at)`. If
-we scale to thousands of SMS per day, add a Redis counter or a materialized
-view.
+Implemented in `apps/workers/src/lib/rate_limit.py`:
+- Per-contact 120s cooldown via `events` table query
+- Per-business daily cap (default: 500) via `check_daily_cap()`
+- Configurable via `businesses.settings.sms_rate_limit_seconds` and `daily_sms_cap`
+- `outbound_action` defers on rate limit hit, skips on daily cap
 
 ---
 
@@ -304,17 +286,17 @@ Current approach: direct OpenAI calls from `lib/llm.py` using `Settings.llm_chat
 
 ## Priority order for deferred items
 
-| Priority | Item | Trigger |
-|---|---|---|
-| 1 | SMS rate limiting | Phase 2 (already planned) |
-| 2 | STOP/START/HELP compliance | Phase 2 (already planned) |
-| 3 | Audit middleware | First enterprise customer |
-| 4 | Circuit breaker | First provider outage |
-| 5 | Prom/OTel metrics | When Sentry alone isn't enough |
-| 6 | Model router | LLM spend > $500/mo |
-| 7 | Voice-first outbound | Business requests it |
-| 8 | Self-serve onboarding | Demand > manual capacity |
-| 9 | PII encryption | HIPAA/finance customer |
-| 10 | BYOK LLM keys | Enterprise data isolation request |
-| 11 | Multi-location | Multi-location customer |
-| 12 | Full TCPA/CAN-SPAM/CCPA | Legal review before scale |
+| Priority | Item | Trigger | Status |
+|---|---|---|---|
+| ~~1~~ | ~~SMS rate limiting~~ | ~~Phase 2~~ | ✅ Done |
+| ~~2~~ | ~~STOP/START/HELP compliance~~ | ~~Phase 2~~ | ✅ Done |
+| 3 | Audit middleware | First enterprise customer | Deferred |
+| 4 | Circuit breaker | First provider outage | Deferred |
+| 5 | Prom/OTel metrics | When Sentry alone isn't enough | Deferred |
+| 6 | Model router | LLM spend > $500/mo | Deferred |
+| 7 | Voice-first outbound | Business requests it | Deferred |
+| 8 | Self-serve onboarding | Demand > manual capacity | Deferred |
+| 9 | PII encryption | HIPAA/finance customer | Deferred |
+| 10 | BYOK LLM keys | Enterprise data isolation request | Deferred |
+| 11 | Multi-location | Multi-location customer | Deferred |
+| 12 | Full TCPA/CAN-SPAM/CCPA | Legal review before scale | Deferred |

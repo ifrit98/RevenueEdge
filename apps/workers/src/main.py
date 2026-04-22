@@ -19,6 +19,7 @@ from .workers.followup_scheduler import FollowupSchedulerWorker
 from .workers.handoff import HandoffWorker
 from .workers.inbound_normalizer import InboundNormalizerWorker
 from .workers.knowledge_ingestion import KnowledgeIngestionWorker
+from .workers.booking_worker import BookingWorker
 from .workers.outbound_action import OutboundActionWorker
 from .workers.quote_drafting import QuoteDraftingWorker
 
@@ -33,6 +34,7 @@ _REGISTRY: dict[str, type[BaseWorker]] = {
     "followup_scheduler": FollowupSchedulerWorker,
     "knowledge_ingestion": KnowledgeIngestionWorker,
     "quote_drafting": QuoteDraftingWorker,
+    "booking": BookingWorker,
 }
 
 

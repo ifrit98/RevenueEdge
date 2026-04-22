@@ -352,6 +352,51 @@ class ConversationIntelligenceWorker(BaseWorker):
             )
             downstream.append("quote-drafting")
 
+        elif next_action == "book":
+            service_id = decision.get("service_id") or (lead or {}).get("service_id")
+            preferred_time = decision.get("preferred_time")
+            booking_confirmed = decision.get("booking_confirmed", False)
+            biz_settings = (business or {}).get("settings") or {}
+            if biz_settings.get("booking_automation_enabled"):
+                await rpc(
+                    "enqueue_job",
+                    {
+                        "p_queue_name": "booking-sync",
+                        "p_payload": {
+                            "lead_id": (lead or {}).get("id"),
+                            "conversation_id": conversation_id,
+                            "business_id": business_id,
+                            "contact_id": ctx["conversation"].get("contact_id"),
+                            "service_id": service_id,
+                            "preferred_time": preferred_time,
+                            "confirmed": booking_confirmed,
+                            "trace_id": trace_id,
+                        },
+                        "p_business_id": business_id,
+                        "p_idempotency_key": f"bk:{job.id}",
+                        "p_priority": 10,
+                    },
+                )
+                downstream.append("booking-sync")
+            else:
+                await rpc(
+                    "enqueue_job",
+                    {
+                        "p_queue_name": "human-handoff",
+                        "p_payload": {
+                            "conversation_id": conversation_id,
+                            "business_id": business_id,
+                            "reason": "booking_requested_no_automation",
+                            "task_type": "callback",
+                            "trace_id": trace_id,
+                        },
+                        "p_business_id": business_id,
+                        "p_idempotency_key": f"ho:book:{job.id}",
+                        "p_priority": 15,
+                    },
+                )
+                downstream.append("human-handoff")
+
         elif next_action in {"collect_quote_details", "ask_followup", "schedule_callback"}:
             template_name = {
                 "collect_quote_details": "quote_intake",

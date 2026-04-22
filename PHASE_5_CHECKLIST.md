@@ -24,7 +24,7 @@
 
 #### 1a. Segment selection
 
-- [ ] Add `lib/reactivation.py` to worker library:
+- [x] Add `lib/reactivation.py` to worker library:
   - `select_reactivation_segment(business_id, filters)`:
     - Default filters from `workflow_defaults`:
       - `leads.stage IN ('no_response', 'nurture')`
@@ -58,16 +58,16 @@
 
 #### 1b. Reactivation API
 
-- [ ] `apps/api/app/routes/reactivation.py`:
+- [x] `apps/api/app/routes/reactivation.py`:
   - `POST /v1/reactivation/preview` — returns segment count + sample leads matching filters (no side effects)
   - `POST /v1/reactivation/launch` — creates the batch, enqueues follow-up jobs, returns batch_id
   - `GET /v1/reactivation/:batch_id` — returns batch status (enqueued, sent, replied, converted)
   - `GET /v1/reactivation` — list recent batches for business
-- [ ] Wire into `main.py`
+- [x] Wire into `main.py`
 
 #### 1c. Follow-up scheduler — reactivation path
 
-- [ ] When `followup_type = 'reactivation'`:
+- [x] When `followup_type = 'reactivation'`:
   - Load contact, check opt-out
   - Load the `reactivation` template (from `message_templates`)
   - Enqueue `outbound-actions` with template + lead/contact context
@@ -110,7 +110,7 @@
 
 ### 3. ROI dashboard data — before/after comparison
 
-- [ ] `GET /v1/metrics/comparison` endpoint:
+- [x] `GET /v1/metrics/comparison` endpoint:
   - Accepts `baseline_start`, `baseline_end`, `comparison_start`, `comparison_end`
   - Returns for each metric:
     ```json
@@ -135,7 +135,7 @@
 
 ### 4. Operator daily summary email
 
-- [ ] New service: `apps/api/app/services/daily_summary.py`:
+- [x] New service: `apps/api/app/services/daily_summary.py`:
   - `generate_daily_summary(business_id, for_date)`:
     - Load `metric_snapshots` for `for_date`
     - Load open tasks (count by type)
@@ -167,7 +167,7 @@
 
 ### 5. Attributed revenue — simple model
 
-- [ ] For MVP, attributed revenue = sum of `quotes.amount_low` for leads where `stage = 'won'` and `updated_at` falls on the metric date
+- [x] For MVP, attributed revenue = sum of `quotes.amount_low` for leads where `stage = 'won'` and `updated_at` falls on the metric date (implemented in `metrics_rollup.py`)
 - [ ] The operator can manually mark a lead as `won` via `PATCH /v1/leads/:id` with `stage = 'won'`
 - [ ] Future: link to payment/invoicing systems for actual closed-won revenue
 
