@@ -31,6 +31,7 @@ from .routes import (
     health as health_routes,
     integrations as integrations_routes,
     knowledge as knowledge_routes,
+    knowledge_ingest as knowledge_ingest_routes,
     leads as leads_routes,
     metrics as metrics_routes,
     queue as queue_routes,
@@ -38,6 +39,7 @@ from .routes import (
     reactivation as reactivation_routes,
     services as services_routes,
     tasks as tasks_routes,
+    uploads as uploads_routes,
 )
 from .services.scheduler import start_scheduler, stop_scheduler
 from .trace import TraceMiddleware, current_trace_id
@@ -80,11 +82,13 @@ app.include_router(channels_routes.router)
 app.include_router(conversations_routes.router)
 app.include_router(integrations_routes.router)
 app.include_router(knowledge_routes.router)
+app.include_router(knowledge_ingest_routes.router)
 app.include_router(leads_routes.router)
 app.include_router(quotes_routes.router)
 app.include_router(reactivation_routes.router)
 app.include_router(services_routes.router)
 app.include_router(tasks_routes.router)
+app.include_router(uploads_routes.router)
 app.include_router(metrics_routes.router)
 
 

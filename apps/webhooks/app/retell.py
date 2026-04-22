@@ -56,6 +56,8 @@ class RetellCall(BaseModel):
     call_analysis: Optional[dict[str, Any]] = None
     agent_id: Optional[str] = None
     metadata: Optional[dict[str, Any]] = None
+    attachments: Optional[list[dict[str, Any]]] = None
+    media_urls: Optional[list[str]] = None
 
 
 class RetellEvent(BaseModel):
@@ -156,6 +158,8 @@ async def handle_retell_webhook(request: Request) -> dict:
         "call_analysis": call.call_analysis,
         "agent_id": call.agent_id,
         "raw_metadata": call.metadata,
+        "attachments": call.attachments,
+        "media_urls": call.media_urls,
     }
 
     # business_id routing happens downstream in inbound_normalizer (lookup

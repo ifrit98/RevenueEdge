@@ -45,6 +45,7 @@ NEXT_ACTIONS = [
     "ask_question",
     "collect_quote_details",
     "draft_quote",
+    "request_photo",
     "book",
     "confirm_booking",
     "schedule_callback",
@@ -89,6 +90,11 @@ When the intent is quote_request or booking_request:
 4. When all required fields are collected, set recommended_next_action = "draft_quote".
 5. If the customer provides unsolicited fields, capture them in fields_collected anyway.
 6. Include each extracted field in "fields_collected" keyed by the field name (e.g. "name", "address", "scope").
+
+## Photo Request
+When a service requires visual assessment (e.g. plumbing leak, damage, landscaping area) and
+the customer hasn't sent a photo yet, set recommended_next_action = "request_photo".
+The system will send them an upload link automatically. Only request once per conversation.
 
 ## Slot Selection (booking flow)
 When the previous outbound message offered numbered time slots (e.g. "1. Thursday at 9AM, 2. Friday at 2PM"):

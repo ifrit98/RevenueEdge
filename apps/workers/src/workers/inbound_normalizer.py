@@ -110,7 +110,11 @@ class InboundNormalizerWorker(BaseWorker):
         # Persist an inbound message row when we have a conversation + body-ish content.
         body = self._extract_body(payload, event_type)
         external_message_id = payload.get("call_id") or payload.get("message_id")
-        if conversation and (body or event_type in {"call.missed", "call.ended", "call.started"}):
+        attachment_urls = self._extract_attachments(payload)
+        if conversation and (body or attachment_urls or event_type in {"call.missed", "call.ended", "call.started"}):
+            raw = {**payload}
+            if attachment_urls:
+                raw["_attachment_urls"] = attachment_urls
             await insert_message(
                 business_id=business_id,
                 conversation_id=conversation["id"],
@@ -118,10 +122,10 @@ class InboundNormalizerWorker(BaseWorker):
                 channel_id=(channel_row or {}).get("id"),
                 direction="inbound",
                 sender_type="customer",
-                body=body,
+                body=body or (f"[{len(attachment_urls)} attachment(s)]" if attachment_urls else body),
                 external_message_id=external_message_id,
                 idempotency_key=f"msg:inbound:{event_type}:{external_message_id}" if external_message_id else None,
-                raw_payload=payload,
+                raw_payload=raw,
             )
 
         # STOP / START / HELP compliance (SMS only).
@@ -241,6 +245,24 @@ class InboundNormalizerWorker(BaseWorker):
         if event_type == "call.ended":
             return None
         return None
+
+    @staticmethod
+    def _extract_attachments(payload: dict) -> list[str]:
+        """Pull media/attachment URLs from Retell MMS or Twilio payloads."""
+        urls: list[str] = []
+        for att in payload.get("attachments") or []:
+            url = att.get("url") or att.get("media_url")
+            if url:
+                urls.append(url)
+        for u in payload.get("media_urls") or []:
+            if u and u not in urls:
+                urls.append(u)
+        num_media = int(payload.get("NumMedia") or 0)
+        for i in range(num_media):
+            u = payload.get(f"MediaUrl{i}")
+            if u and u not in urls:
+                urls.append(u)
+        return urls
 
     @staticmethod
     def _detect_sms_command(body: str) -> Optional[str]:

@@ -80,3 +80,39 @@ async def get_conversation(
         "messages": messages.data or [],
         "contact": contact,
     }
+
+
+async def _insert_message_from_api(
+    *,
+    business_id: str,
+    conversation_id: str,
+    contact_id: Optional[str] = None,
+    body: Optional[str] = None,
+    direction: str = "inbound",
+    sender_type: str = "customer",
+    raw_payload: Optional[dict] = None,
+) -> dict:
+    """Insert a message row from the API layer (e.g. upload completion)."""
+    from datetime import datetime, timezone
+
+    client = get_supabase_client()
+    if client is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    now = datetime.now(timezone.utc).isoformat()
+    row = {
+        "business_id": business_id,
+        "conversation_id": conversation_id,
+        "contact_id": contact_id,
+        "direction": direction,
+        "sender_type": sender_type,
+        "body": body,
+        "raw_payload": raw_payload or {},
+        "created_at": now,
+    }
+    res = await async_execute(client.table("messages").insert(row))
+    await async_execute(
+        client.table("conversations")
+        .update({"last_message_at": now})
+        .eq("id", conversation_id)
+    )
+    return (res.data or [{}])[0]

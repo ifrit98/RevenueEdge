@@ -47,6 +47,8 @@ class OutboundActionWorker(BaseWorker):
         action = payload.get("action") or "send_sms"
         if action == "send_quote":
             return await self._handle_send_quote(job, payload)
+        if action == "request_photo":
+            return await self._handle_request_photo(job, payload)
         if action != "send_sms":
             raise PermanentError(f"unsupported action: {action}")
 
@@ -410,3 +412,111 @@ class OutboundActionWorker(BaseWorker):
             "quote_id": quote_id,
             "provider": send_result.provider,
         }
+
+    async def _handle_request_photo(self, job: Job, payload: dict) -> dict:
+        """Send the customer an SMS with a photo upload link."""
+        business_id = payload.get("business_id")
+        conversation_id = payload.get("conversation_id")
+        contact_id = payload.get("contact_id")
+        trace_id = payload.get("trace_id")
+        purpose = payload.get("purpose") or "photo_request"
+
+        if not business_id or not conversation_id:
+            raise PermanentError("business_id and conversation_id required for request_photo")
+
+        client = get_client()
+        contact = None
+        if contact_id:
+            res = await async_execute(
+                client.table("contacts")
+                .select("id, name, phone_e164, metadata")
+                .eq("id", contact_id)
+                .limit(1)
+            )
+            rows = getattr(res, "data", None) or []
+            contact = rows[0] if rows else None
+
+        if not contact or not contact.get("phone_e164"):
+            raise PermanentError("contact has no phone for photo request SMS")
+
+        if (contact.get("metadata") or {}).get("sms_opt_out"):
+            return {"skipped": True, "reason": "sms_opt_out"}
+
+        settings = get_worker_settings()
+        api_url = settings.re_api_url.rstrip("/")
+        internal_key = settings.internal_service_key
+
+        import httpx as _httpx
+        async with _httpx.AsyncClient(timeout=10) as http:
+            resp = await http.post(
+                f"{api_url}/v1/uploads/request-link",
+                json={
+                    "conversation_id": conversation_id,
+                    "contact_id": contact_id,
+                    "purpose": purpose,
+                },
+                headers={
+                    "x-internal-key": internal_key,
+                    "x-business-id": business_id,
+                    "x-user-id": "system",
+                },
+            )
+            if resp.status_code >= 300:
+                raise RetryableError(f"Upload link request failed: {resp.status_code} {resp.text[:200]}")
+            link_data = resp.json()
+
+        upload_url = link_data.get("upload_url", "")
+        business = await fetch_business(business_id)
+        biz_name = (business or {}).get("name") or "Our team"
+        body = (
+            f"Hi! {biz_name} here. Could you send us a photo of the area or "
+            f"issue? You can upload it here: {upload_url}\n\n"
+            f"Or simply reply to this message with a picture if your phone supports it."
+        )
+
+        from_number = settings.retell_from_number
+        if not from_number:
+            raise RetryableError("no from_number configured for SMS send")
+
+        try:
+            send_result = await send_sms_retell(
+                to_number=contact["phone_e164"],
+                from_number=from_number,
+                body=body,
+                metadata={"conversation_id": conversation_id, "trace_id": trace_id, "purpose": purpose},
+            )
+        except Exception as exc:
+            raise RetryableError(f"SMS provider error: {exc}") from exc
+
+        await insert_message(
+            business_id=business_id,
+            conversation_id=conversation_id,
+            contact_id=contact_id,
+            channel_id=None,
+            direction="outbound",
+            sender_type="ai",
+            body=body,
+            external_message_id=send_result.message_id,
+            idempotency_key=f"msg:photo-req:{job.id}",
+            raw_payload={"upload_url": upload_url, "trace_id": trace_id, "purpose": purpose},
+        )
+
+        await rpc(
+            "enqueue_event",
+            {
+                "p_event_type": "outbound.photo_request.sent",
+                "p_payload": {
+                    "conversation_id": conversation_id,
+                    "business_id": business_id,
+                    "contact_id": contact_id,
+                    "upload_url": upload_url,
+                    "trace_id": trace_id,
+                },
+                "p_business_id": business_id,
+                "p_aggregate_type": "conversation",
+                "p_aggregate_id": conversation_id,
+                "p_idempotency_key": f"ob:photo-req:{job.id}",
+            },
+        )
+
+        return {"sent": True, "upload_url": upload_url, "provider": send_result.provider}

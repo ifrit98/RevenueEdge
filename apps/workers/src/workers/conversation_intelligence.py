@@ -397,6 +397,26 @@ class ConversationIntelligenceWorker(BaseWorker):
                 )
                 downstream.append("human-handoff")
 
+        elif next_action == "request_photo":
+            await rpc(
+                "enqueue_job",
+                {
+                    "p_queue_name": "outbound-actions",
+                    "p_payload": {
+                        "action": "request_photo",
+                        "conversation_id": conversation_id,
+                        "business_id": business_id,
+                        "contact_id": ctx["conversation"].get("contact_id"),
+                        "purpose": decision.get("photo_purpose") or "visual_assessment",
+                        "trace_id": trace_id,
+                    },
+                    "p_business_id": business_id,
+                    "p_idempotency_key": f"ob:photo:{job.id}",
+                    "p_priority": 15,
+                },
+            )
+            downstream.append("outbound-actions")
+
         elif next_action in {"collect_quote_details", "ask_followup", "schedule_callback"}:
             template_name = {
                 "collect_quote_details": "quote_intake",
