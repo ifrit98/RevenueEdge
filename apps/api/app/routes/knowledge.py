@@ -1,13 +1,17 @@
 """/v1/knowledge — CRUD for knowledge_items (FAQ, objection handling, etc.).
 
 Create/update triggers a `knowledge-ingestion` job for embedding.
+
+Schema note: column is ``content`` (not ``body``), ``type`` is an enum
+(``faq | objection | product | policy | other``), and items have
+``approved`` / ``review_required`` / ``tags`` fields.
 """
 
 from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -22,23 +26,28 @@ router = APIRouter(prefix="/v1/knowledge", tags=["knowledge"])
 
 class KnowledgeItemCreate(BaseModel):
     title: str = Field(..., min_length=1, max_length=500)
-    body: str = Field(..., min_length=1)
-    category: str = Field(default="faq", max_length=100)
+    content: str = Field(..., min_length=1)
+    type: str = Field(default="faq", pattern=r"^(faq|objection|product|policy|other)$")
+    tags: List[str] = Field(default_factory=list)
     active: bool = True
+    approved: bool = False
     metadata: Optional[dict] = None
 
 
 class KnowledgeItemUpdate(BaseModel):
     title: Optional[str] = Field(None, min_length=1, max_length=500)
-    body: Optional[str] = Field(None, min_length=1)
-    category: Optional[str] = Field(None, max_length=100)
+    content: Optional[str] = Field(None, min_length=1)
+    type: Optional[str] = Field(None, pattern=r"^(faq|objection|product|policy|other)$")
+    tags: Optional[List[str]] = None
     active: Optional[bool] = None
+    approved: Optional[bool] = None
 
 
 @router.get("")
 async def list_knowledge(
-    category: Optional[str] = Query(None),
+    type: Optional[str] = Query(None, alias="type"),
     active_only: bool = Query(True),
+    approved_only: bool = Query(False),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     user: dict = Depends(get_business_user),
@@ -49,13 +58,15 @@ async def list_knowledge(
 
     q = (
         client.table("knowledge_items")
-        .select("id, title, body, category, active, created_at, updated_at", count="exact")
+        .select("id, title, content, type, tags, active, approved, review_required, created_at, updated_at", count="exact")
         .eq("business_id", user["business_id"])
     )
-    if category:
-        q = q.eq("category", category)
+    if type:
+        q = q.eq("type", type)
     if active_only:
         q = q.eq("active", True)
+    if approved_only:
+        q = q.eq("approved", True)
     q = q.order("created_at", desc=True).range(offset, offset + limit - 1)
     res = await async_execute(q)
     return {
@@ -71,7 +82,7 @@ async def get_knowledge_item(item_id: str, user: dict = Depends(get_business_use
         raise HTTPException(status_code=503, detail="Database unavailable")
     res = await async_execute(
         client.table("knowledge_items")
-        .select("id, title, body, category, active, metadata, created_at, updated_at")
+        .select("id, title, content, type, tags, active, approved, review_required, metadata, created_at, updated_at")
         .eq("id", item_id)
         .eq("business_id", user["business_id"])
         .limit(1)
@@ -92,9 +103,12 @@ async def create_knowledge_item(
     row = {
         "business_id": user["business_id"],
         "title": body.title,
-        "body": body.body,
-        "category": body.category,
+        "content": body.content,
+        "type": body.type,
+        "tags": body.tags,
         "active": body.active,
+        "approved": body.approved,
+        "review_required": not body.approved,
         "metadata": body.metadata or {},
     }
     res = await async_execute(client.table("knowledge_items").insert(row))
@@ -129,7 +143,7 @@ async def update_knowledge_item(
     if not rows:
         raise HTTPException(status_code=404, detail="Knowledge item not found")
 
-    if "title" in patch or "body" in patch:
+    if "title" in patch or "content" in patch:
         await _enqueue_ingestion(client, item_id, user["business_id"], action="re_embed")
     return rows[0]
 
@@ -151,7 +165,6 @@ async def delete_knowledge_item(
 
 
 async def _enqueue_ingestion(client, item_id: str, business_id: str, action: str = "embed") -> None:
-    """Fire a knowledge-ingestion job via the queue RPC."""
     try:
         await async_execute(
             client.rpc(

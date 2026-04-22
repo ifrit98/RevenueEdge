@@ -43,7 +43,7 @@ class KnowledgeIngestionWorker(BaseWorker):
         client = get_client()
         res = await async_execute(
             client.table("knowledge_items")
-            .select("id, title, body, category, active, metadata")
+            .select("id, title, content, type, active, metadata")
             .eq("id", item_id)
             .limit(1)
         )
@@ -52,7 +52,7 @@ class KnowledgeIngestionWorker(BaseWorker):
             raise PermanentError(f"knowledge_item {item_id} not found")
 
         item = rows[0]
-        combined_text = f"{item.get('title') or ''}\n\n{item.get('body') or ''}".strip()
+        combined_text = f"{item.get('title') or ''}\n\n{item.get('content') or ''}".strip()
 
         if not combined_text:
             logger.warning("Knowledge item %s has no text — skipping embed", item_id)
@@ -87,7 +87,7 @@ class KnowledgeIngestionWorker(BaseWorker):
                     "status": "open",
                     "metadata": {
                         "knowledge_item_id": item_id,
-                        "category": item.get("category"),
+                        "type": item.get("type"),
                         "trace_id": trace_id,
                     },
                 })

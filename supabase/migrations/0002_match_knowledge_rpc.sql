@@ -10,8 +10,8 @@ CREATE OR REPLACE FUNCTION public.match_knowledge(
 RETURNS TABLE (
     id uuid,
     title text,
-    body text,
-    category text,
+    content text,
+    type text,
     metadata jsonb,
     similarity float
 )
@@ -24,15 +24,15 @@ BEGIN
     SELECT
         ki.id,
         ki.title,
-        ki.body,
-        ki.category,
+        ki.content,
+        ki.type::text,
         ki.metadata,
         1 - (ki.embedding <=> p_embedding) AS similarity
     FROM knowledge_items ki
     WHERE ki.business_id = p_business_id
       AND ki.active = true
       AND ki.embedding IS NOT NULL
-      AND (p_categories IS NULL OR ki.category = ANY(p_categories))
+      AND (p_categories IS NULL OR ki.type::text = ANY(p_categories))
     ORDER BY ki.embedding <=> p_embedding
     LIMIT p_match_count;
 END;

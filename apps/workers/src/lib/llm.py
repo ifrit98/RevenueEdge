@@ -114,7 +114,7 @@ def _format_messages_for_llm(context: dict[str, Any]) -> list[dict[str, str]]:
         kb_lines = ["## Business Knowledge"]
         for i, art in enumerate(kb_articles[:5], 1):
             title = art.get("title") or "(untitled)"
-            body_text = (art.get("body") or "")[:600]
+            body_text = (art.get("content") or art.get("body") or "")[:600]
             kb_lines.append(f"\n### Article {i}: {title}\n{body_text}")
         sections.append("\n".join(kb_lines))
 

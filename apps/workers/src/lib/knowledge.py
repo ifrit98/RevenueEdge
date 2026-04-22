@@ -121,11 +121,11 @@ async def _lexical_search(
     categories: Optional[list[str]],
     limit: int,
 ) -> list[dict]:
-    """pg_trgm similarity search on ``title || ' ' || body``."""
-    q = client.table("knowledge_items").select("id, title, body, category, metadata")
+    """Full-text search on ``search_tsv`` (generated from title + content)."""
+    q = client.table("knowledge_items").select("id, title, content, type, metadata")
     q = q.eq("business_id", business_id).eq("active", True)
     if categories:
-        q = q.in_("category", categories)
+        q = q.in_("type", categories)
     q = q.text_search("title", query, config="english")
     q = q.limit(limit)
     try:
