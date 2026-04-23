@@ -53,6 +53,9 @@ logs/
 *.key
 !**/test_keys/*.pem
 
+# Test artifacts
+test_account.json
+
 # Build artifacts
 target/
 *.egg
