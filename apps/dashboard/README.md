@@ -1,36 +1,120 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Revenue Edge Dashboard
 
-## Getting Started
+Operator-facing UI for managing the Revenue Edge agent. Built with Next.js 16, React 19, Supabase SSR auth, and Tailwind CSS.
 
-First, run the development server:
+## Tech Stack
+
+- **Next.js 16** with App Router
+- **React 19** with Server Components
+- **Supabase** for authentication (email/password via `@supabase/ssr`)
+- **Tailwind CSS** for styling
+- **Recharts** for metrics charts
+- **Lucide React** for icons
+
+## Pages
+
+| Route | Purpose |
+|-------|---------|
+| `/` | Dashboard home: today's metrics (missed calls, recovered leads, quotes, bookings, revenue) with charts |
+| `/inbox` | Task inbox: human handoffs, callbacks, quote reviews, knowledge reviews with filters |
+| `/leads` | Lead pipeline: list with stage badges, urgency, value, and inline stage updates |
+| `/quotes` | Quote management: list with approve/decline actions |
+| `/bookings` | Booking list: upcoming/completed/cancelled with status badges |
+| `/knowledge` | Knowledge base: list, create, edit, delete items; bulk ingestion (website, document, Google Docs) |
+| `/reactivation` | Stale lead reactivation: preview segment, launch campaign, batch status |
+| `/settings/business` | Business profile: name, vertical, timezone, hours |
+| `/settings/channels` | Channel configuration: phone, SMS, email, web |
+| `/settings/services` | Service catalog: create/edit services with pricing and intake fields |
+| `/settings/integrations` | Third-party connections: Google Calendar OAuth |
+| `/login` | Email/password login |
+| `/signup` | New user registration |
+
+## Local Development
+
+### Prerequisites
+
+- Node.js 20+
+- A running `re-api` instance (default: `http://localhost:8080`)
+- A Supabase project
+
+### Setup
+
+```bash
+cd apps/dashboard
+npm install
+```
+
+Create `.env.local`:
+
+```
+NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key
+NEXT_PUBLIC_API_URL=http://localhost:8080
+```
+
+### Run
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+# Open http://localhost:3000
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+### Build
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+npm run build   # Production build (standalone output)
+npm start       # Serve production build
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Authentication Flow
 
-## Learn More
+1. User submits email/password on `/login` or `/signup`
+2. Supabase Auth returns a session with JWT
+3. Next.js middleware (`src/middleware.ts`) refreshes session cookies on every request
+4. Unauthenticated users are redirected to `/login`; authenticated users on `/login` are redirected to `/`
+5. API calls use `apiFetch()` from `src/lib/api.ts`, which attaches `Authorization: Bearer <token>` and `x-business-id` headers
+6. The user must be a member of a business (in `business_members`) to see any data
 
-To learn more about Next.js, take a look at the following resources:
+## Project Structure
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```
+src/
+├── app/
+│   ├── (app)/           # Authenticated pages (layout with sidebar)
+│   │   ├── page.tsx     # Dashboard home
+│   │   ├── inbox/
+│   │   ├── leads/
+│   │   ├── quotes/
+│   │   ├── bookings/
+│   │   ├── knowledge/
+│   │   ├── reactivation/
+│   │   └── settings/
+│   │       ├── business/
+│   │       ├── channels/
+│   │       ├── services/
+│   │       └── integrations/
+│   ├── login/
+│   ├── signup/
+│   ├── layout.tsx       # Root layout (globals, fonts)
+│   └── globals.css      # Tailwind base + custom styles
+├── components/
+│   └── StatusBadge.tsx  # Reusable status badge component
+├── lib/
+│   ├── api.ts           # API client (apiFetch)
+│   ├── format.ts        # Date/currency/text formatters
+│   └── supabase/
+│       ├── client.ts    # Browser Supabase client
+│       ├── server.ts    # Server Supabase client
+│       └── middleware.ts # Session refresh + auth redirects
+└── middleware.ts         # Next.js middleware (delegates to supabase/middleware)
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Environment Variables
 
-## Deploy on Vercel
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `NEXT_PUBLIC_SUPABASE_URL` | Yes | Supabase project URL |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Yes | Supabase anonymous key |
+| `NEXT_PUBLIC_API_URL` | No | API base URL (default: `http://localhost:8080`) |
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+In production, these are passed as Docker build args (see `docker-compose.prod.yml`).

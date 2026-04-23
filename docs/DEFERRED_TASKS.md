@@ -12,43 +12,39 @@ implementation cost estimate, and when to revisit.
 - **Completed**: Script seeds business with hours/knowledge, simulates after-hours +
   unanswerable SMS, asserts reply + classification + knowledge_gap task.
 
-### D-2.2 Knowledge sources CRUD
-- **Why deferred**: Manual knowledge entry is sufficient for MVP; scraping/parsing adds complexity.
-- **Effort**: 4–6 hours (routes + scraper worker)
-- **When**: When a business has > 50 knowledge items and wants automated ingestion from their website.
+### D-2.2 Knowledge sources CRUD — COMPLETE
+- **Completed**: Full knowledge ingestion pipeline implemented with three modes:
+  - Website scraper (`POST /v1/knowledge/ingest/website`) with SSRF protection
+  - Document upload (`POST /v1/knowledge/ingest/document`) for PDF/DOCX/TXT
+  - Google Docs integration (`POST /v1/knowledge/ingest/google-docs`)
+- Workers: `knowledge_ingestion` handles scrape, embed, and Google Docs fetch actions.
+- Libraries: `web_scraper.py`, `doc_parser.py`, `text_chunker.py`.
 
 ---
 
 ## Phase 3 — Qualification + Quote Intake
 
-### D-3.1 Photo request flow (MMS)
-- **Why deferred**: Retell's MMS surface may not be stable; photo collection is optional for most verticals.
-- **Effort**: 4–8 hours (inbound MMS parsing + storage + `photos` intake field)
-- **When**: When a service-based business (e.g., roofing, painting) requests it.
-- **Workaround**: The `photo_request` template can include a link to a simple upload page.
-- **Implementation notes**:
-  - `inbound_normalizer` needs to parse `message.attachments` from Retell webhook
-  - Store URLs in `messages.attachments` (JSONB array)
-  - `conversation_intelligence` detects attachments → sets `fields_collected.photos`
-  - Consider Supabase Storage for self-hosted upload fallback
+### D-3.1 Photo request flow (MMS) — COMPLETE
+- **Completed**: Dual-mode implementation:
+  - **Retell MMS primary**: Webhook model extended with `attachments` and `media_urls` fields;
+    `inbound_normalizer` extracts attachment URLs from multiple payload formats.
+  - **Upload-link fallback**: `POST /v1/uploads/request-link` creates a one-time upload token;
+    `outbound_action` sends the link via SMS; customer uploads via Supabase Storage.
+  - LLM prompt includes `request_photo` next-action guidance.
+  - Migration `0003_upload_tokens.sql` adds `upload_tokens` table and `photos` bucket.
 
 ### D-3.2 Seed default services — COMPLETE
 - **Completed**: Added `--services <vertical>` flag to `scripts/seed_business.py`.
   Supports plumbing, hvac, electrical, landscaping, cleaning, dental, general.
   Each vertical has 3–4 service presets with intake fields and price ranges.
 
-### D-3.3 `WorkerSettings.auto_quote_max`
-- **Why deferred**: No limit needed for MVP; all quotes go to human review anyway.
-- **Effort**: 30 min
-- **When**: When a business wants auto-send for quotes under $X.
+### D-3.3 `WorkerSettings.auto_quote_max` — COMPLETE
+- **Completed**: `quote_drafting` worker checks `businesses.settings.auto_quote_max`.
+  Quotes at or below the threshold are auto-approved and enqueued for send, bypassing manual review.
 
-### D-3.4 Phase 3 metrics additions
-- **Why deferred**: The `quotes_sent` column already exists in `metric_snapshots` and is computed by the rollup. Extended metrics (`estimate_turnaround_seconds`, `quote_recovery_wins`) require more complex queries.
-- **Effort**: 2 hours
-- **When**: After 50+ quotes flow through the system and operators want turnaround KPIs.
-- **Implementation**:
-  - `estimate_turnaround_seconds`: average time from `lead.created` event to `quote.sent` event per business per day.
-  - `quote_recovery_wins`: count leads that moved `quoted → won` after a `quote_followup_*` outbound message.
+### D-3.4 Phase 3 metrics additions — COMPLETE
+- **Completed**: `metrics_rollup.py` now computes `estimate_turnaround_seconds` and
+  `quote_recovery_wins` and stores them in `metric_snapshots.payload` (version 4).
 
 ### D-3.5 Smoke test: `scripts/smoke_phase3.sh` — COMPLETE
 - **Completed**: Script seeds service, simulates quote request + field replies, asserts
@@ -68,21 +64,19 @@ implementation cost estimate, and when to revisit.
 - **Effort**: 2 hours to add explicit "customer selected slot N" detection
 - **When**: After testing the basic booking flow.
 
-### D-4.3 Google Calendar event updates on reschedule
-- **Why deferred**: The `bookings.py` route updates the DB row but doesn't call `google_calendar.update_event` because the API service doesn't have direct access to the worker's Google Calendar library.
-- **Effort**: 2 hours (enqueue a `booking-sync` job with `action: reschedule`)
-- **When**: After first Google Calendar integration is tested.
+### D-4.3 Google Calendar event updates on reschedule — COMPLETE
+- **Completed**: `bookings.py` cancel and reschedule endpoints enqueue `booking-sync`
+  jobs with `action: cancel` or `action: reschedule`. The `booking_worker` dispatches
+  to `_handle_cancel` (calls `cancel_event`) and `_handle_reschedule` (calls `update_event`
+  with proper Google Calendar event format).
 
-### D-4.4 No-show grace period per service
-- **Why deferred**: Default 1-hour grace period is hard-coded. Some services (e.g., multi-hour jobs) need longer.
-- **Effort**: 30 min
-- **When**: When a service business reports false no-show positives.
-- **Implementation**: Add `services.metadata.no_show_grace_minutes` and read it in the `no_show_check` handler.
+### D-4.4 No-show grace period per service — COMPLETE
+- **Completed**: `booking_worker` reads `services.metadata.no_show_grace_minutes` (defaults to 60)
+  and uses it when calculating the `no_show_at` timestamp.
 
-### D-4.5 Phase 4 metrics additions
-- **Columns**: `booking_requests`, `callbacks_created`, `no_shows` in `metric_snapshots.payload`.
-- **Effort**: 1–2 hours
-- **When**: After booking flow is live.
+### D-4.5 Phase 4 metrics additions — COMPLETE
+- **Completed**: `metrics_rollup.py` now computes `booking_requests`, `callbacks_created`,
+  and `no_shows` and stores them in `metric_snapshots.payload` (version 4).
 
 ### D-4.6 Smoke test: `scripts/smoke_phase4.sh` — COMPLETE
 - **Completed**: Script simulates booking request, asserts either booking created
@@ -97,10 +91,9 @@ implementation cost estimate, and when to revisit.
   inbound-to-outbound response time per conversation. Stored in
   `metric_snapshots.payload.avg_response_seconds`. Payload version bumped to 3.
 
-### D-5.2 Enhanced reactivation metrics
-- **Metrics**: `reactivation_sent`, `reactivation_replies`, `reactivation_conversions` in `metric_snapshots.payload`.
-- **Effort**: 1–2 hours
-- **When**: After first reactivation batch.
+### D-5.2 Enhanced reactivation metrics — COMPLETE
+- **Completed**: `metrics_rollup.py` now computes `reactivation_sent`, `reactivation_replies`,
+  and `reactivation_conversions` and stores them in `metric_snapshots.payload` (version 4).
 
 ### D-5.3 Daily summary scheduler integration — COMPLETE
 - **Completed**: Wired `_summary_loop` into `apps/api/app/services/scheduler.py`.
@@ -160,24 +153,59 @@ These items have their own detailed documents and are not repeated here:
 
 ---
 
-## Priority order for implementation
+## External Service Hardening — COMPLETE
+
+A comprehensive audit of all external service integrations was performed, resulting
+in 17 fixes across security, data correctness, and resilience. Applied as migration
+`0004_hardening.sql` and code changes across 16 files. Committed as `961fe55`.
+
+Key fixes:
+- SSRF protection in web scraper (private-IP blocklist, queue cap, response size limit)
+- Booking reschedule argument fix (`update_event` kwargs -> dict)
+- `PermanentError` now immediately dead-letters via `p_force_dead` SQL parameter
+- Contact upsert race condition handling
+- Atomic conversation metadata merge via SQL RPC
+- `CalendarUnavailableError` prevents wrong slot offers during outages
+- JSON decode, transport, and timeout error handling across all providers
+- Stuck running job reaper (every 2 minutes)
+- RPC timeouts (30s) on all Supabase calls from workers
+- Per-contact SMS rate limiting
+- Google Doc ID injection prevention
+- Document parse error wrapping
+- Webhook UTF-8 decode safety
+
+---
+
+## Priority Order for Remaining Work
 
 | Priority | Item | Trigger | Effort |
 |---|---|---|---|
-| ~~1~~ | ~~D-5.3 Daily summary scheduler~~ | | **DONE** |
-| ~~2~~ | ~~D-X.1 Dashboard UI~~ | | **DONE** |
-| ~~3~~ | ~~D-X.2 Smoke tests~~ | | **DONE** |
-| ~~4~~ | ~~D-4.1 Fuzzy time resolution~~ | | **DONE** |
-| ~~5~~ | ~~D-5.1 avg_response_seconds~~ | | **DONE** |
-| ~~6~~ | ~~D-X.3 Production Docker config~~ | | **DONE** |
-| ~~7~~ | ~~D-X.4 CI/CD pipeline~~ | | **DONE** |
-| ~~8~~ | ~~D-3.2 Seed default services~~ | | **DONE** |
-| 1 | D-3.1 Photo request (MMS) | Service business requests | 4–8h |
-| 2 | D-4.2 Multi-turn slot offering | After basic booking tested | 2h |
-| 3 | D-4.3 GCal event updates on reschedule | After GCal integration tested | 2h |
-| 4 | D-3.3 auto_quote_max threshold | When auto-send needed | 30m |
-| 5 | D-3.4 Extended quote metrics | After 50+ quotes | 2h |
-| 6 | D-4.4 No-show grace per service | When false positives reported | 30m |
-| 7 | D-4.5 Phase 4 metrics additions | After booking flow live | 1–2h |
-| 8 | D-5.2 Enhanced reactivation metrics | After first reactivation batch | 1–2h |
-| 9 | D-2.2 Knowledge sources CRUD | When >50 knowledge items | 4–6h |
+| 1 | D-4.2 Multi-turn slot offering | After basic booking tested | 2h |
+
+All other deferred tasks have been completed. See individual sections above for details.
+
+### Completed Task Summary
+
+| Item | Commit |
+|---|---|
+| D-2.1 Smoke phase 2 | `dbfa562` |
+| D-2.2 Knowledge ingestion | `80a077d` |
+| D-3.1 Photo/MMS flow | `80a077d` |
+| D-3.2 Seed services | `dbfa562` |
+| D-3.3 auto_quote_max | `7cb074a` |
+| D-3.4 Quote metrics | `7cb074a` |
+| D-3.5 Smoke phase 3 | `dbfa562` |
+| D-4.1 Fuzzy time | `7cb074a` |
+| D-4.3 GCal reschedule/cancel | `7cb074a` |
+| D-4.4 No-show grace | `7cb074a` |
+| D-4.5 Phase 4 metrics | `7cb074a` |
+| D-4.6 Smoke phase 4 | `dbfa562` |
+| D-5.1 avg_response_seconds | `7cb074a` |
+| D-5.2 Reactivation metrics | `7cb074a` |
+| D-5.3 Daily summary | `272fa1a` |
+| D-5.4 Smoke phase 5 | `dbfa562` |
+| D-X.1 Dashboard | `272fa1a` |
+| D-X.2 Smoke tests | `dbfa562` |
+| D-X.3 Prod Docker | `dbfa562` |
+| D-X.4 CI/CD | `dbfa562` |
+| Hardening (17 fixes) | `961fe55` |
